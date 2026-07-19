@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Readiness</title>
+
+<!-- PWA / Home Screen -->
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#12100E" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Readiness" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet" />
+
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/recharts/umd/Recharts.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #F5F1E8;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .mono { font-variant-numeric: tabular-nums; }
+  button { font-family: inherit; cursor: pointer; }
+  .recharts-cartesian-axis-tick text { fill: #8A8172; font-size: 11px; }
+  input { font-family: inherit; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useMemo, useRef, useEffect } = React;
+const {
+  ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, ReferenceLine, ComposedChart, Bar, Cell
+} = Recharts;
+
+const C = {
+  ink:"#12100E", paper:"#F5F1E8", panel:"#FBF9F3", line:"#DDD5C4", muted:"#8A8172",
+  green:"#3F7D4E", greenSoft:"#E4EFE2", amber:"#C8871C", amberSoft:"#F5EAD2",
+  red:"#B23A32", redSoft:"#F3DED9", hrv:"#2E5E8C",
+};
+
+const STORAGE_KEY = "readiness_360hp_rows_v1";
+
+// ---------- csv ----------
+function parseCSV(text){
+  const lines = text.trim().split(/\r?\n/);
+  const headers = lines[0].split(",").map(h=>h.trim());
+  return lines.slice(1).map(line=>{
+    const parts = line.split(",");
+    const row = {};
+    headers.forEach((h,i)=>{ row[h]=(parts[i]??"").trim(); });
+    return row;
+  });
+}
+function parseDate(s){ const [d,m,y]=s.split("-").map(Number); return new Date(y,m-1,d); }
+function fmtShort(d){ return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"}); }
+function median(arr){ if(!arr.length) return null; const s=[...arr].sort((a,b)=>a-b); const m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
+
+// ---------- scoring ----------
+function buildModel(rows){
+  const data = rows.filter(r=>r.date&&r.rMSSD).map(r=>({
+    date:parseDate(r.date), dateStr:r.date, hrv:parseFloat(r.rMSSD),
+    rhr:r.RHR?parseFloat(r.RHR):null, subjective:r.subjective?parseFloat(r.subjective):null,
+    objective:r.objective?parseFloat(r.objective):null,
+    sleep:r.sleep?parseFloat(r.sleep):null, energy:r.energy?parseFloat(r.energy):null,
+    tags:(r.tags||"").trim(), note:(r.note||"").trim(),
+  })).sort((a,b)=>a.date-b.date);
+
+  const WINDOW=7;
+  const flagWords=["pain","fatigue","ill","sick","injur","lock"];
+
+  return data.map((row,i)=>{
+    const prior=data.slice(Math.max(0,i-WINDOW),i);
+    const hrvPrior=prior.map(p=>p.hrv).filter(Number.isFinite);
+    const rhrPrior=prior.map(p=>p.rhr).filter(Number.isFinite);
+    const hrvBase=hrvPrior.length>=3?median(hrvPrior):null;
+    const rhrBase=rhrPrior.length>=3?median(rhrPrior):null;
+    let hrvDev=hrvBase?(row.hrv-hrvBase)/hrvBase:null;
+
+    let hrvScore=0,rhrScore=0,subjScore=0;
+    if(hrvDev!==null) hrvScore=Math.max(-1,Math.min(1,hrvDev/0.15));
+    if(rhrBase&&row.rhr){ const rd=(row.rhr-rhrBase)/rhrBase; rhrScore=Math.max(-1,Math.min(1,-rd/0.08)); }
+    if(row.subjective!==null) subjScore=Math.max(-1,Math.min(1,(row.subjective-7.5)/2));
+
+    const wHRV=hrvDev!==null?0.55:0;
+    const wSubj=row.subjective!==null?0.30:0;
+    const wRHR=(rhrBase&&row.rhr)?0.15:0;
+    const wSum=wHRV+wSubj+wRHR||1;
+    let composite=(hrvScore*wHRV+subjScore*wSubj+rhrScore*wRHR)/wSum;
+
+    const text=(row.tags+" "+row.note).toLowerCase();
+    const flagged=flagWords.some(w=>text.includes(w));
+    let override=null;
+    if(flagged){ composite=Math.min(composite,-0.5); override="flag"; }
+
+    let band = composite>=0.15?"green":composite>=-0.2?"yellow":"red";
+    return {...row,hrvBase,rhrBase,hrvDev,composite,band,override,hasBaseline:hrvBase!==null};
+  });
+}
+
+function reasonFor(d){
+  if(!d.hasBaseline) return "Not enough history yet to set your baseline — need ~3 prior days.";
+  const bits=[]; const pct=Math.round(d.hrvDev*100);
+  if(pct>=8) bits.push(`HRV ${pct}% above your 7-day baseline`);
+  else if(pct<=-8) bits.push(`HRV ${Math.abs(pct)}% below baseline`);
+  else bits.push(`HRV close to baseline (${pct>=0?"+":""}${pct}%)`);
+  if(d.subjective!==null){ if(d.subjective>=8.5) bits.push("strong subjective read"); else if(d.subjective<=7) bits.push("subjective read is low"); }
+  if(d.rhrBase&&d.rhr){ const rd=Math.round(d.rhr-d.rhrBase); if(rd>=4) bits.push(`resting HR up ${rd} bpm`); else if(rd<=-3) bits.push(`resting HR down ${Math.abs(rd)} bpm`); }
+  if(d.override==="flag") bits.push(`flagged: ${d.tags||"note"}`);
+  return bits.join(" · ");
+}
+
+const VERDICT={
+  green:{word:"GREEN",head:"Push",body:"Body's ready. Good day for a hard session or heavy practice load."},
+  yellow:{word:"YELLOW",head:"Moderate",body:"Middle ground. Technical work, skills, or a moderate session — leave the max effort for a green day."},
+  red:{word:"RED",head:"Recover",body:"Signals are down. Rest, mobility, or light recovery. Pushing today digs the hole deeper."},
+};
+
+function Stat({label,value,sub,color}){
+  return (
+    <div style={{background:C.panel,border:`1px solid ${C.line}`,borderRadius:12,padding:"14px 16px"}}>
+      <div style={{fontSize:11.5,color:C.muted,textTransform:"uppercase",letterSpacing:"0.06em"}}>{label}</div>
+      <div className="mono" style={{fontSize:26,fontWeight:600,marginTop:4,color:color||C.ink,fontFamily:"'Fraunces',serif"}}>{value}</div>
+      {sub&&<div className="mono" style={{fontSize:12,color:C.muted,marginTop:2}}>{sub}</div>}
+    </div>
+  );
+}
+function ChartCard({title,note,children}){
+  return (
+    <div style={{background:C.panel,border:`1px solid ${C.line}`,borderRadius:14,padding:18,marginBottom:16}}>
+      <div style={{fontFamily:"'Fraunces',serif",fontSize:17,fontWeight:600}}>{title}</div>
+      {note&&<div style={{color:C.muted,fontSize:12.5,margin:"2px 0 12px",lineHeight:1.5}}>{note}</div>}
+      {children}
+    </div>
+  );
+}
+
+function App(){
+  const [rows,setRows]=useState(()=>{
+    try{ const s=localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):null; }catch(e){ return null; }
+  });
+  const [error,setError]=useState("");
+  const [token,setToken]=useState("");
+  const [savedNote,setSavedNote]=useState(false);
+  const fileRef=useRef();
+
+  useEffect(()=>{
+    try{ if(rows) localStorage.setItem(STORAGE_KEY,JSON.stringify(rows)); }catch(e){}
+  },[rows]);
+
+  const model=useMemo(()=>rows?buildModel(rows):null,[rows]);
+  const today=model&&model.length?model[model.length-1]:null;
+
+  const chartData=useMemo(()=>{
+    if(!model) return [];
+    return model.filter(d=>d.hasBaseline).map(d=>({
+      label:fmtShort(new Date(d.date)), hrv:d.hrv,
+      base:d.hrvBase?Math.round(d.hrvBase*10)/10:null,
+      subjective:d.subjective, rhr:d.rhr,
+      composite:Math.round(d.composite*100), band:d.band,
+    }));
+  },[model]);
+
+  function handleFile(e){
+    const file=e.target.files?.[0]; if(!file) return;
+    const reader=new FileReader();
+    reader.onload=ev=>{
+      try{
+        const parsed=parseCSV(ev.target.result);
+        if(!parsed.length||!("rMSSD" in parsed[0])){ setError("That file doesn't look like a 360HP export — no rMSSD column found."); return; }
+        setError(""); setRows(parsed); setSavedNote(true); setTimeout(()=>setSavedNote(false),2200);
+      }catch(err){ setError("Couldn't read that file. Make sure it's the raw 360HP CSV export."); }
+    };
+    reader.readAsText(file);
+  }
+
+  const bandColor=today?C[today.band]:C.muted;
+  const bandSoft=today?C[today.band+"Soft"]:C.panel;
+
+  return (
+    <div style={{minHeight:"100vh",background:C.paper,color:C.ink,padding:"clamp(16px,4vw,40px)"}}>
+      <div style={{maxWidth:860,margin:"0 auto"}}>
+
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",flexWrap:"wrap",gap:8,marginBottom:24}}>
+          <div>
+            <div style={{fontFamily:"'Fraunces',serif",fontSize:"clamp(28px,7vw,40px)",fontWeight:600,letterSpacing:"-0.02em"}}>Readiness</div>
+            <div style={{color:C.muted,fontSize:14,marginTop:2}}>HRV-led daily training signal</div>
+          </div>
+          {today&&<div style={{textAlign:"right",fontSize:13,color:C.muted}}>Latest reading<br/><span className="mono" style={{color:C.ink,fontSize:15}}>{today.dateStr}</span></div>}
+        </div>
+
+        {savedNote&&<div style={{background:C.greenSoft,color:C.green,fontSize:13,padding:"8px 12px",borderRadius:8,marginBottom:16}}>Saved to this device — your history will be here next time you open the app.</div>}
+
+        {today&&(
+          <React.Fragment>
+            <div style={{background:bandSoft,border:`1px solid ${bandColor}33`,borderRadius:18,padding:"clamp(20px,4vw,32px)",marginBottom:20}}>
+              <div style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}}>
+                <div style={{width:64,height:64,borderRadius:"50%",background:bandColor,flexShrink:0,boxShadow:`0 0 0 6px ${bandColor}22`}}/>
+                <div>
+                  <div className="mono" style={{fontSize:12,letterSpacing:"0.14em",color:bandColor,fontWeight:600}}>{VERDICT[today.band].word}</div>
+                  <div style={{fontFamily:"'Fraunces',serif",fontSize:"clamp(26px,6vw,34px)",fontWeight:600,lineHeight:1.1}}>{VERDICT[today.band].head}</div>
+                </div>
+              </div>
+              <p style={{fontSize:15,lineHeight:1.6,margin:"16px 0 0",maxWidth:560}}>{VERDICT[today.band].body}</p>
+              <div style={{marginTop:14,padding:"10px 14px",background:"#ffffff88",borderRadius:10,fontSize:13.5,lineHeight:1.5}}>{reasonFor(today)}</div>
+            </div>
+
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:12,marginBottom:28}}>
+              <Stat label="HRV (rMSSD)" value={today.hrv.toFixed(1)} sub={today.hrvBase?`base ${today.hrvBase.toFixed(0)}`:""}/>
+              <Stat label="Resting HR" value={today.rhr??"—"} sub={today.rhrBase?`base ${today.rhrBase.toFixed(0)}`:""}/>
+              <Stat label="Subjective" value={today.subjective??"—"} sub="/ 10"/>
+              <Stat label="Score" value={(today.composite*100).toFixed(0)} sub="−100…100" color={bandColor}/>
+            </div>
+
+            <ChartCard title="HRV vs your rolling baseline" note="Blue is daily HRV; dashed line is your 7-day baseline. Distance from it drives the score.">
+              <ResponsiveContainer width="100%" height={240}>
+                <ComposedChart data={chartData} margin={{top:8,right:8,bottom:0,left:-18}}>
+                  <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false}/>
+                  <XAxis dataKey="label" tickLine={false} axisLine={{stroke:C.line}} minTickGap={24}/>
+                  <YAxis tickLine={false} axisLine={false}/>
+                  <Tooltip contentStyle={{borderRadius:10,border:`1px solid ${C.line}`,fontSize:13}}/>
+                  <Line type="monotone" dataKey="base" stroke={C.muted} strokeWidth={1} dot={false} strokeDasharray="4 3" name="baseline"/>
+                  <Line type="monotone" dataKey="hrv" stroke={C.hrv} strokeWidth={2.4} dot={false} name="HRV"/>
+                </ComposedChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            <ChartCard title="Daily score" note="Composite readiness, −100 to +100. Green ≥ 15, red ≤ −20.">
+              <ResponsiveContainer width="100%" height={200}>
+                <ComposedChart data={chartData} margin={{top:8,right:8,bottom:0,left:-18}}>
+                  <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false}/>
+                  <XAxis dataKey="label" tickLine={false} axisLine={{stroke:C.line}} minTickGap={24}/>
+                  <YAxis domain={[-100,100]} tickLine={false} axisLine={false}/>
+                  <Tooltip contentStyle={{borderRadius:10,border:`1px solid ${C.line}`,fontSize:13}}/>
+                  <ReferenceLine y={15} stroke={C.green} strokeDasharray="3 3"/>
+                  <ReferenceLine y={-20} stroke={C.red} strokeDasharray="3 3"/>
+                  <Bar dataKey="composite" name="score" radius={[3,3,0,0]}>
+                    {chartData.map((d,i)=><Cell key={i} fill={C[d.band]}/>)}
+                  </Bar>
+                </ComposedChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            <ChartCard title="Subjective vs resting HR" note="Morning subjective score against resting heart rate.">
+              <ResponsiveContainer width="100%" height={200}>
+                <ComposedChart data={chartData} margin={{top:8,right:8,bottom:0,left:-18}}>
+                  <CartesianGrid stroke={C.line} strokeDasharray="2 4" vertical={false}/>
+                  <XAxis dataKey="label" tickLine={false} axisLine={{stroke:C.line}} minTickGap={24}/>
+                  <YAxis yAxisId="l" domain={[5,10]} tickLine={false} axisLine={false}/>
+                  <YAxis yAxisId="r" orientation="right" domain={[45,85]} tickLine={false} axisLine={false}/>
+                  <Tooltip contentStyle={{borderRadius:10,border:`1px solid ${C.line}`,fontSize:13}}/>
+                  <Line yAxisId="l" type="monotone" dataKey="subjective" stroke={C.green} strokeWidth={2} dot={false} name="subjective"/>
+                  <Line yAxisId="r" type="monotone" dataKey="rhr" stroke={C.red} strokeWidth={2} dot={false} name="resting HR"/>
+                </ComposedChart>
+              </ResponsiveContainer>
+            </ChartCard>
+
+            <div style={{display:"flex",gap:10,flexWrap:"wrap",marginTop:8}}>
+              <button onClick={()=>fileRef.current?.click()} style={{background:C.ink,color:C.paper,border:"none",borderRadius:8,padding:"10px 18px",fontSize:14,fontWeight:500}}>Update with new CSV</button>
+              <button onClick={()=>{ if(confirm("Clear saved history from this device?")){ localStorage.removeItem(STORAGE_KEY); setRows(null); } }} style={{background:"transparent",color:C.muted,border:`1px solid ${C.line}`,borderRadius:8,padding:"10px 18px",fontSize:14}}>Clear data</button>
+            </div>
+            <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+          </React.Fragment>
+        )}
+
+        {!today&&(
+          <div style={{background:C.panel,border:`1px solid ${C.line}`,borderRadius:16,padding:28}}>
+            <div style={{fontFamily:"'Fraunces',serif",fontSize:22,marginBottom:6}}>Get started</div>
+            <p style={{color:C.muted,fontSize:14,lineHeight:1.6,marginTop:0}}>Import your 360HP CSV to generate today's signal. Your HRV (rMSSD) is the primary driver, scored against your own 7-day rolling baseline. Once imported, your history is saved on this device.</p>
+            <button onClick={()=>fileRef.current?.click()} style={{background:C.ink,color:C.paper,border:"none",borderRadius:10,padding:"12px 20px",fontSize:15,fontWeight:500}}>Import 360HP CSV</button>
+            <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{display:"none"}}/>
+            {error&&<div style={{color:C.red,fontSize:13,marginTop:14}}>{error}</div>}
+
+            <div style={{marginTop:28,paddingTop:22,borderTop:`1px solid ${C.line}`}}>
+              <div style={{fontSize:14,fontWeight:600,marginBottom:6}}>Oura live pull <span style={{color:C.amber,fontWeight:500}}>— coming next</span></div>
+              <p style={{color:C.muted,fontSize:13,lineHeight:1.6,margin:"0 0 10px"}}>Paste your Oura Personal Access Token to save it for when live pull is wired up. Browsers can't call the Oura API directly, so this needs a small relay — the next step. Token stays on this device only.</p>
+              <input type="password" placeholder="Oura personal access token" value={token} onChange={e=>setToken(e.target.value)} style={{width:"100%",padding:"10px 12px",borderRadius:8,border:`1px solid ${C.line}`,background:"#fff",fontSize:14}}/>
+            </div>
+          </div>
+        )}
+
+        <div style={{marginTop:32,color:C.muted,fontSize:12,lineHeight:1.6,borderTop:`1px solid ${C.line}`,paddingTop:16}}>
+          Signal, not diagnosis. This reads trends in your own data to suggest how hard to go — it doesn't replace how you actually feel or medical advice. A red day when you feel great is worth a second look; a green day when you feel ill is not a licence to push.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
