@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Readiness</title>
+
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#04141A" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Readiness" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet" />
+
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: #04141A;
+    background-image: radial-gradient(120% 80% at 50% -10%, #0A2A34 0%, #061C24 42%, #04141A 100%);
+    background-attachment: fixed;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    color: #DCEEF0;
+  }
+  .mono { font-variant-numeric: tabular-nums; }
+  button { font-family: inherit; cursor: pointer; }
+  input { font-family: inherit; }
+  #boot { padding: 40px 24px; color: #6E9AA0; font-family: sans-serif; font-size: 14px; }
+  .recharts-cartesian-axis-tick text { fill: #6E9AA0; font-size: 11px; }
+  .recharts-cartesian-grid line { stroke: #123845; }
+</style>
+</head>
+<body>
+<div id="root"><div id="boot">Loading…</div></div>
+
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-is@18.3.1/umd/react-is.production.min.js"></script>
+<script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+<script>
+(function(){
+  "use strict";
+
+  function boot(msg){ var b=document.getElementById("boot"); if(b) b.textContent=msg; }
+  if(!window.React || !window.ReactDOM){ boot("Couldn't load the app framework. Check your connection and reopen this page."); return; }
+
+  var e = React.createElement;
+  var useState = React.useState, useMemo = React.useMemo, useRef = React.useRef, useEffect = React.useEffect;
+  var RC = window.Recharts || null;
+
+  // ---------- ocean-night / bioluminescent palette ----------
+  var C = {
+    bg:"#04141A",
+    panel:"#0A2028",        // panel fill
+    panel2:"#0E2A34",       // raised panel
+    line:"#123845",         // borders / grid
+    ink:"#DCEEF0",          // primary text (pale seafoam)
+    muted:"#6E9AA0",        // secondary text
+    glow:"#3DE0C8",         // bioluminescent teal (accent)
+    green:"#2FE6B0",        // good — glowing aqua-green
+    greenSoft:"#0E3A38",
+    amber:"#E8B65A",        // caution — warm lantern
+    amberSoft:"#3A3018",
+    red:"#FF6B6B",          // recover — coral
+    redSoft:"#3A1C22",
+    hrv:"#57C7FF",          // hrv line — moonlit cyan
+    hrvBand:"#1C5566",      // variability band fill
+    r7:"#2FE6B0",           // rolling 7
+    r30:"#8A7DFF",          // rolling 30 — deep-sea violet
+  };
+  var STORAGE_KEY = "readiness_360hp_rows_v1";
+
+  // ---------- csv ----------
+  function parseCSV(text){
+    var lines = text.trim().split(/\r?\n/);
+    var headers = lines[0].split(",").map(function(h){return h.trim();});
+    return lines.slice(1).map(function(line){
+      var parts = line.split(",");
+      var row = {}; headers.forEach(function(h,i){ row[h] = (parts[i]!=null?parts[i]:"").trim(); }); return row;
+    });
+  }
+  function parseDate(s){ var p=s.split("-").map(Number); return new Date(p[2],p[1]-1,p[0]); }
+  function fmtShort(d){ return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"}); }
+  function median(arr){ if(!arr.length) return null; var s=arr.slice().sort(function(a,b){return a-b;}); var m=Math.floor(s.length/2); return s.length%2? s[m] : (s[m-1]+s[m])/2; }
+  function mean(arr){ if(!arr.length) return null; return arr.reduce(function(a,b){return a+b;},0)/arr.length; }
+  function stdev(arr){ if(arr.length<2) return null; var m=mean(arr); return Math.sqrt(mean(arr.map(function(v){return (v-m)*(v-m);}))); }
+
+  // ---------- scoring + analytics ----------
+  function buildModel(rows){
+    var data = rows.filter(function(r){return r.date && r.rMSSD;}).map(function(r){
+      return { date:parseDate(r.date), dateStr:r.date, hrv:parseFloat(r.rMSSD),
+        rhr:r.RHR?parseFloat(r.RHR):null, subjective:r.subjective?parseFloat(r.subjective):null,
+        sleep:r.sleep?parseFloat(r.sleep):null, energy:r.energy?parseFloat(r.energy):null,
+        tags:(r.tags||"").trim(), note:(r.note||"").trim() };
+    }).sort(function(a,b){return a.date-b.date;});
+
+    var WINDOW=7, flagWords=["pain","fatigue","ill","sick","injur","lock"];
+
+    return data.map(function(row,i){
+      var prior=data.slice(Math.max(0,i-WINDOW),i);
+      var hrvPrior=prior.map(function(p){return p.hrv;}).filter(function(v){return isFinite(v);});
+      var rhrPrior=prior.map(function(p){return p.rhr;}).filter(function(v){return isFinite(v);});
+      var hrvBase=hrvPrior.length>=3?median(hrvPrior):null;
+      var rhrBase=rhrPrior.length>=3?median(rhrPrior):null;
+      var hrvSd=hrvPrior.length>=3?stdev(hrvPrior):null;
+      var hrvDev=hrvBase?(row.hrv-hrvBase)/hrvBase:null;
+
+      // rolling averages incl today
+      var w7=data.slice(Math.max(0,i-6),i+1).map(function(p){return p.hrv;}).filter(isFinite);
+      var w30=data.slice(Math.max(0,i-29),i+1).map(function(p){return p.hrv;}).filter(isFinite);
+      var roll7=w7.length>=3?mean(w7):null;
+      var roll30=w30.length>=5?mean(w30):null;
+
+      var hrvScore=0,rhrScore=0,subjScore=0;
+      if(hrvDev!==null) hrvScore=Math.max(-1,Math.min(1,hrvDev/0.15));
+      if(rhrBase&&row.rhr){ var rd=(row.rhr-rhrBase)/rhrBase; rhrScore=Math.max(-1,Math.min(1,-rd/0.08)); }
+      if(row.subjective!==null) subjScore=Math.max(-1,Math.min(1,(row.subjective-7.5)/2));
+
+      var wHRV=hrvDev!==null?0.55:0, wSubj=row.subjective!==null?0.30:0, wRHR=(rhrBase&&row.rhr)?0.15:0, wSum=wHRV+wSubj+wRHR||1;
+      var composite=(hrvScore*wHRV+subjScore*wSubj+rhrScore*wRHR)/wSum;
+
+      var text=(row.tags+" "+row.note).toLowerCase();
+      var override=null;
+      if(flagWords.some(function(w){return text.indexOf(w)>=0;})){ composite=Math.min(composite,-0.5); override="flag"; }
+
+      var band = composite>=0.15?"green":(composite>=-0.2?"yellow":"red");
+      return Object.assign({},row,{hrvBase:hrvBase,rhrBase:rhrBase,hrvSd:hrvSd,hrvDev:hrvDev,
+        roll7:roll7,roll30:roll30,composite:composite,band:band,override:override,hasBaseline:hrvBase!==null});
+    });
+  }
+
+  function pearson(xs,ys){
+    var n=xs.length; if(n<4) return null;
+    var mx=mean(xs), my=mean(ys);
+    var num=0,dx=0,dy=0;
+    for(var i=0;i<n;i++){ var a=xs[i]-mx, b=ys[i]-my; num+=a*b; dx+=a*a; dy+=b*b; }
+    if(dx===0||dy===0) return null;
+    return num/Math.sqrt(dx*dy);
+  }
+
+  function reasonFor(d){
+    if(!d.hasBaseline) return "Not enough history yet to set your baseline — need ~3 prior days.";
+    var bits=[]; var pct=Math.round(d.hrvDev*100);
+    if(pct>=8) bits.push("HRV "+pct+"% above your 7-day baseline");
+    else if(pct<=-8) bits.push("HRV "+Math.abs(pct)+"% below baseline");
+    else bits.push("HRV close to baseline ("+(pct>=0?"+":"")+pct+"%)");
+    if(d.subjective!==null){ if(d.subjective>=8.5) bits.push("strong subjective read"); else if(d.subjective<=7) bits.push("subjective read is low"); }
+    if(d.rhrBase&&d.rhr){ var rd=Math.round(d.rhr-d.rhrBase); if(rd>=4) bits.push("resting HR up "+rd+" bpm"); else if(rd<=-3) bits.push("resting HR down "+Math.abs(rd)+" bpm"); }
+    if(d.override==="flag") bits.push("flagged: "+(d.tags||"note"));
+    return bits.join(" · ");
+  }
+
+  var VERDICT={
+    green:{word:"GREEN",head:"Push",body:"Body's ready. Good day for a hard session or heavy practice load."},
+    yellow:{word:"YELLOW",head:"Moderate",body:"Middle ground. Technical work, skills, or a moderate session — leave the max effort for a green day."},
+    red:{word:"RED",head:"Recover",body:"Signals are down. Rest, mobility, or light recovery. Pushing today digs the hole deeper."}
+  };
+
+  // ---------- UI atoms ----------
+  function Stat(p){
+    return e("div",{style:{background:C.panel,border:"1px solid "+C.line,borderRadius:12,padding:"14px 16px"}},
+      e("div",{style:{fontSize:11.5,color:C.muted,textTransform:"uppercase",letterSpacing:"0.06em"}},p.label),
+      e("div",{className:"mono",style:{fontSize:26,fontWeight:600,marginTop:4,color:p.color||C.ink,fontFamily:"'Fraunces',serif"}},p.value),
+      p.sub?e("div",{className:"mono",style:{fontSize:12,color:C.muted,marginTop:2}},p.sub):null
+    );
+  }
+  function ChartCard(p){
+    return e("div",{style:{background:C.panel,border:"1px solid "+C.line,borderRadius:14,padding:18,marginBottom:16,boxShadow:"0 1px 0 rgba(61,224,200,0.04) inset"}},
+      e("div",{style:{fontFamily:"'Fraunces',serif",fontSize:17,fontWeight:600,color:C.ink}},p.title),
+      p.note?e("div",{style:{color:C.muted,fontSize:12.5,margin:"2px 0 12px",lineHeight:1.5}},p.note):null,
+      p.children
+    );
+  }
+
+  function Charts(props){
+    if(!RC){
+      return e("div",{style:{background:C.panel,border:"1px solid "+C.line,borderRadius:14,padding:18,marginBottom:16,color:C.muted,fontSize:13,lineHeight:1.6}},
+        "Charts didn't load this time. Your verdict and numbers above are all correct — pull down to refresh the page and the graphs should appear.");
+    }
+    var ResponsiveContainer=RC.ResponsiveContainer, Line=RC.Line, Area=RC.Area, XAxis=RC.XAxis, YAxis=RC.YAxis,
+        CartesianGrid=RC.CartesianGrid, Tooltip=RC.Tooltip, ReferenceLine=RC.ReferenceLine, Legend=RC.Legend,
+        ComposedChart=RC.ComposedChart, Bar=RC.Bar, Cell=RC.Cell, ScatterChart=RC.ScatterChart, Scatter=RC.Scatter, ZAxis=RC.ZAxis;
+    var data=props.data, scatter=props.scatter, corr=props.corr;
+    var tip={contentStyle:{borderRadius:10,border:"1px solid "+C.line,background:C.panel2,color:C.ink,fontSize:13},labelStyle:{color:C.muted}};
+    var grid=e(CartesianGrid,{stroke:C.line,strokeDasharray:"2 4",vertical:false});
+
+    return e(React.Fragment,null,
+
+      // 1. HRV vs baseline (kept)
+      e(ChartCard,{title:"HRV vs your rolling baseline",note:"Moonlit line is daily HRV; dashed is your 7-day baseline. Distance from it drives the score."},
+        e(ResponsiveContainer,{width:"100%",height:240},
+          e(ComposedChart,{data:data,margin:{top:8,right:8,bottom:0,left:-18}},grid,
+            e(XAxis,{dataKey:"label",tickLine:false,axisLine:{stroke:C.line},minTickGap:24}),
+            e(YAxis,{tickLine:false,axisLine:false}),
+            e(Tooltip,tip),
+            e(Line,{type:"monotone",dataKey:"base",stroke:C.muted,strokeWidth:1,dot:false,strokeDasharray:"4 3",name:"baseline"}),
+            e(Line,{type:"monotone",dataKey:"hrv",stroke:C.hrv,strokeWidth:2.4,dot:false,name:"HRV"})
+          )
+        )
+      ),
+
+      // 2. HRV trend + variability band (NEW)
+      e(ChartCard,{title:"HRV trend with variability band",note:"Shaded band is your normal day-to-day swing (±1 SD around baseline). Inside the band = normal noise; breaking below it = a real dip worth respecting."},
+        e(ResponsiveContainer,{width:"100%",height:240},
+          e(ComposedChart,{data:data,margin:{top:8,right:8,bottom:0,left:-18}},grid,
+            e(XAxis,{dataKey:"label",tickLine:false,axisLine:{stroke:C.line},minTickGap:24}),
+            e(YAxis,{tickLine:false,axisLine:false}),
+            e(Tooltip,tip),
+            e(Area,{type:"monotone",dataKey:"bandLow",stackId:"band",stroke:"none",fill:"transparent",name:"",legendType:"none"}),
+            e(Area,{type:"monotone",dataKey:"bandRange",stackId:"band",stroke:"none",fill:C.hrvBand,fillOpacity:0.5,name:"normal range",legendType:"none"}),
+            e(Line,{type:"monotone",dataKey:"hrv",stroke:C.hrv,strokeWidth:2.4,dot:false,name:"HRV"})
+          )
+        )
+      ),
+
+      // 3. Rolling 7 vs 30 (NEW)
+      e(ChartCard,{title:"Rolling 7-day vs 30-day HRV",note:"When the fast (7-day) line drops below the slow (30-day) line, fatigue is building before you feel it. When it climbs back above, you're absorbing the load well."},
+        e(ResponsiveContainer,{width:"100%",height:220},
+          e(ComposedChart,{data:data,margin:{top:8,right:8,bottom:0,left:-18}},grid,
+            e(XAxis,{dataKey:"label",tickLine:false,axisLine:{stroke:C.line},minTickGap:24}),
+            e(YAxis,{tickLine:false,axisLine:false}),
+            e(Tooltip,tip),
+            e(Legend,{wrapperStyle:{fontSize:12,color:C.muted}}),
+            e(Line,{type:"monotone",dataKey:"roll7",stroke:C.r7,strokeWidth:2.4,dot:false,name:"7-day"}),
+            e(Line,{type:"monotone",dataKey:"roll30",stroke:C.r30,strokeWidth:2.4,dot:false,name:"30-day"})
+          )
+        )
+      ),
+
+      // 4. Daily score (kept)
+      e(ChartCard,{title:"Daily score",note:"Composite readiness, −100 to +100. Green ≥ 15, red ≤ −20."},
+        e(ResponsiveContainer,{width:"100%",height:200},
+          e(ComposedChart,{data:data,margin:{top:8,right:8,bottom:0,left:-18}},grid,
+            e(XAxis,{dataKey:"label",tickLine:false,axisLine:{stroke:C.line},minTickGap:24}),
+            e(YAxis,{domain:[-100,100],tickLine:false,axisLine:false}),
+            e(Tooltip,tip),
+            e(ReferenceLine,{y:15,stroke:C.green,strokeDasharray:"3 3"}),
+            e(ReferenceLine,{y:-20,stroke:C.red,strokeDasharray:"3 3"}),
+            e(Bar,{dataKey:"composite",name:"score",radius:[3,3,0,0]},
+              data.map(function(d,i){return e(Cell,{key:i,fill:C[d.band]});}))
+          )
+        )
+      ),
+
+      // 5. Sleep vs HRV correlation (NEW)
+      e(ChartCard,{title:"Does sleep predict your HRV?",
+        note: corr!=null ? ("Each dot is a day: sleep quality (x) vs same-day HRV (y). Correlation r = "+corr.toFixed(2)+" — "+corrWord(corr)+".")
+                          : "Each dot is a day: sleep quality (x) vs same-day HRV (y). Need a few more days to compute the correlation."},
+        e(ResponsiveContainer,{width:"100%",height:240},
+          e(ScatterChart,{margin:{top:8,right:12,bottom:6,left:-18}},grid,
+            e(XAxis,{type:"number",dataKey:"x",name:"sleep",domain:[0.5,4.5],ticks:[1,2,3,4],tickLine:false,axisLine:{stroke:C.line}}),
+            e(YAxis,{type:"number",dataKey:"y",name:"HRV",tickLine:false,axisLine:false}),
+            e(Tooltip,Object.assign({cursor:{stroke:C.line}},tip)),
+            e(Scatter,{data:scatter,fill:C.glow,fillOpacity:0.8})
+          )
+        )
+      ),
+
+      // 6. Subjective vs RHR (kept)
+      e(ChartCard,{title:"Subjective vs resting HR",note:"Morning subjective score against resting heart rate."},
+        e(ResponsiveContainer,{width:"100%",height:200},
+          e(ComposedChart,{data:data,margin:{top:8,right:8,bottom:0,left:-18}},grid,
+            e(XAxis,{dataKey:"label",tickLine:false,axisLine:{stroke:C.line},minTickGap:24}),
+            e(YAxis,{yAxisId:"l",domain:[5,10],tickLine:false,axisLine:false}),
+            e(YAxis,{yAxisId:"r",orientation:"right",domain:[45,85],tickLine:false,axisLine:false}),
+            e(Tooltip,tip),
+            e(Line,{yAxisId:"l",type:"monotone",dataKey:"subjective",stroke:C.green,strokeWidth:2,dot:false,name:"subjective"}),
+            e(Line,{yAxisId:"r",type:"monotone",dataKey:"rhr",stroke:C.red,strokeWidth:2,dot:false,name:"resting HR"})
+          )
+        )
+      )
+    );
+  }
+
+  function corrWord(r){
+    var a=Math.abs(r);
+    var strength = a<0.2?"essentially no link":a<0.4?"a weak link":a<0.6?"a moderate link":"a strong link";
+    var dir = r>=0?"better sleep tends to mean higher HRV":"unexpectedly, higher sleep scores track lower HRV here";
+    return strength+" ("+dir+")";
+  }
+
+  // ---------- app ----------
+  function App(){
+    var rowsState = useState(function(){ try{ var s=localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):null; }catch(err){ return null; } });
+    var rows=rowsState[0], setRows=rowsState[1];
+    var errState=useState(""); var error=errState[0], setError=errState[1];
+    var tokState=useState(""); var token=tokState[0], setToken=tokState[1];
+    var savedState=useState(false); var savedNote=savedState[0], setSavedNote=savedState[1];
+    var fileRef=useRef();
+
+    useEffect(function(){ try{ if(rows) localStorage.setItem(STORAGE_KEY,JSON.stringify(rows)); }catch(err){} },[rows]);
+
+    var model=useMemo(function(){ return rows?buildModel(rows):null; },[rows]);
+    var today=(model&&model.length)?model[model.length-1]:null;
+
+    var chartData=useMemo(function(){
+      if(!model) return [];
+      return model.filter(function(d){return d.hasBaseline;}).map(function(d){
+        var low = (d.hrvBase!=null&&d.hrvSd!=null)? Math.max(0,d.hrvBase-d.hrvSd) : null;
+        var range = (d.hrvBase!=null&&d.hrvSd!=null)? (2*d.hrvSd) : null;
+        return { label:fmtShort(new Date(d.date)), hrv:d.hrv,
+          base:d.hrvBase?Math.round(d.hrvBase*10)/10:null,
+          bandLow:low!=null?Math.round(low*10)/10:null,
+          bandRange:range!=null?Math.round(range*10)/10:null,
+          roll7:d.roll7?Math.round(d.roll7*10)/10:null,
+          roll30:d.roll30?Math.round(d.roll30*10)/10:null,
+          subjective:d.subjective, rhr:d.rhr,
+          composite:Math.round(d.composite*100), band:d.band };
+      });
+    },[model]);
+
+    var scatter=useMemo(function(){
+      if(!model) return [];
+      return model.filter(function(d){return d.sleep!=null && isFinite(d.hrv);})
+        .map(function(d){ return {x:d.sleep, y:Math.round(d.hrv*10)/10}; });
+    },[model]);
+
+    var corr=useMemo(function(){
+      if(!model) return null;
+      var pts=model.filter(function(d){return d.sleep!=null && isFinite(d.hrv);});
+      if(pts.length<4) return null;
+      return pearson(pts.map(function(d){return d.sleep;}), pts.map(function(d){return d.hrv;}));
+    },[model]);
+
+    function handleFile(ev){
+      var file=ev.target.files&&ev.target.files[0]; if(!file) return;
+      var reader=new FileReader();
+      reader.onload=function(x){
+        try{
+          var parsed=parseCSV(x.target.result);
+          if(!parsed.length||!("rMSSD" in parsed[0])){ setError("That file doesn't look like a 360HP export — no rMSSD column found."); return; }
+          setError(""); setRows(parsed); setSavedNote(true); setTimeout(function(){setSavedNote(false);},2200);
+        }catch(err){ setError("Couldn't read that file. Make sure it's the raw 360HP CSV export."); }
+      };
+      reader.readAsText(file);
+    }
+
+    var bandColor=today?C[today.band]:C.muted;
+    var bandSoft=today?C[today.band+"Soft"]:C.panel;
+
+    var header=e("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"baseline",flexWrap:"wrap",gap:8,marginBottom:24}},
+      e("div",null,
+        e("div",{style:{fontFamily:"'Fraunces',serif",fontSize:"clamp(28px,7vw,40px)",fontWeight:600,letterSpacing:"-0.02em",color:C.ink,textShadow:"0 0 24px rgba(61,224,200,0.25)"}},"Readiness"),
+        e("div",{style:{color:C.muted,fontSize:14,marginTop:2}},"HRV-led daily training signal")
+      ),
+      today?e("div",{style:{textAlign:"right",fontSize:13,color:C.muted}},"Latest reading",e("br"),e("span",{className:"mono",style:{color:C.ink,fontSize:15}},today.dateStr)):null
+    );
+
+    var fileInput=e("input",{ref:fileRef,type:"file",accept:".csv",onChange:handleFile,style:{display:"none"}});
+
+    var body;
+    if(today){
+      body=e(React.Fragment,null,
+        savedNote?e("div",{style:{background:C.greenSoft,color:C.green,fontSize:13,padding:"8px 12px",borderRadius:8,marginBottom:16,border:"1px solid "+C.green+"44"}},"Saved to this device — your history will be here next time you open the app."):null,
+        e("div",{style:{background:bandSoft,border:"1px solid "+bandColor+"55",borderRadius:18,padding:"clamp(20px,4vw,32px)",marginBottom:20,boxShadow:"0 0 40px -12px "+bandColor+"66"}},
+          e("div",{style:{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap"}},
+            e("div",{style:{width:64,height:64,borderRadius:"50%",background:bandColor,flexShrink:0,boxShadow:"0 0 24px 2px "+bandColor+"aa, 0 0 0 6px "+bandColor+"22"}}),
+            e("div",null,
+              e("div",{className:"mono",style:{fontSize:12,letterSpacing:"0.14em",color:bandColor,fontWeight:600}},VERDICT[today.band].word),
+              e("div",{style:{fontFamily:"'Fraunces',serif",fontSize:"clamp(26px,6vw,34px)",fontWeight:600,lineHeight:1.1,color:C.ink}},VERDICT[today.band].head)
+            )
+          ),
+          e("p",{style:{fontSize:15,lineHeight:1.6,margin:"16px 0 0",maxWidth:560,color:C.ink}},VERDICT[today.band].body),
+          e("div",{style:{marginTop:14,padding:"10px 14px",background:"rgba(4,20,26,0.55)",borderRadius:10,fontSize:13.5,lineHeight:1.5,color:C.ink}},reasonFor(today))
+        ),
+        e("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(120px,1fr))",gap:12,marginBottom:28}},
+          e(Stat,{label:"HRV (rMSSD)",value:today.hrv.toFixed(1),sub:today.hrvBase?("base "+today.hrvBase.toFixed(0)):"",color:C.hrv}),
+          e(Stat,{label:"Resting HR",value:today.rhr!=null?today.rhr:"—",sub:today.rhrBase?("base "+today.rhrBase.toFixed(0)):""}),
+          e(Stat,{label:"Subjective",value:today.subjective!=null?today.subjective:"—",sub:"/ 10"}),
+          e(Stat,{label:"Score",value:(today.composite*100).toFixed(0),sub:"−100…100",color:bandColor})
+        ),
+        e(Charts,{data:chartData,scatter:scatter,corr:corr}),
+        e("div",{style:{display:"flex",gap:10,flexWrap:"wrap",marginTop:8}},
+          e("button",{onClick:function(){fileRef.current&&fileRef.current.click();},style:{background:C.glow,color:C.bg,border:"none",borderRadius:8,padding:"10px 18px",fontSize:14,fontWeight:600,boxShadow:"0 0 20px -6px "+C.glow}},"Update with new CSV"),
+          e("button",{onClick:function(){ if(confirm("Clear saved history from this device?")){ localStorage.removeItem(STORAGE_KEY); setRows(null); } },style:{background:"transparent",color:C.muted,border:"1px solid "+C.line,borderRadius:8,padding:"10px 18px",fontSize:14}},"Clear data")
+        ),
+        fileInput
+      );
+    } else {
+      body=e("div",{style:{background:C.panel,border:"1px solid "+C.line,borderRadius:16,padding:28}},
+        e("div",{style:{fontFamily:"'Fraunces',serif",fontSize:22,marginBottom:6,color:C.ink}},"Get started"),
+        e("p",{style:{color:C.muted,fontSize:14,lineHeight:1.6,marginTop:0}},"Import your 360HP CSV to generate today's signal. Your HRV (rMSSD) is the primary driver, scored against your own 7-day rolling baseline. Once imported, your history is saved on this device."),
+        e("button",{onClick:function(){fileRef.current&&fileRef.current.click();},style:{background:C.glow,color:C.bg,border:"none",borderRadius:10,padding:"12px 20px",fontSize:15,fontWeight:600,boxShadow:"0 0 24px -6px "+C.glow}},"Import 360HP CSV"),
+        fileInput,
+        error?e("div",{style:{color:C.red,fontSize:13,marginTop:14}},error):null,
+        e("div",{style:{marginTop:28,paddingTop:22,borderTop:"1px solid "+C.line}},
+          e("div",{style:{fontSize:14,fontWeight:600,marginBottom:6,color:C.ink}},"Oura live pull ",e("span",{style:{color:C.amber,fontWeight:500}},"— coming next")),
+          e("p",{style:{color:C.muted,fontSize:13,lineHeight:1.6,margin:"0 0 10px"}},"Paste your Oura Personal Access Token to save it for when live pull is wired up. Browsers can't call the Oura API directly, so this needs a small relay — the next step. Token stays on this device only."),
+          e("input",{type:"password",placeholder:"Oura personal access token",value:token,onChange:function(x){setToken(x.target.value);},style:{width:"100%",padding:"10px 12px",borderRadius:8,border:"1px solid "+C.line,background:C.panel2,color:C.ink,fontSize:14}})
+        )
+      );
+    }
+
+    var footer=e("div",{style:{marginTop:32,color:C.muted,fontSize:12,lineHeight:1.6,borderTop:"1px solid "+C.line,paddingTop:16}},
+      "Signal, not diagnosis. This reads trends in your own data to suggest how hard to go — it doesn't replace how you actually feel or medical advice. A red day when you feel great is worth a second look; a green day when you feel ill is not a licence to push.");
+
+    return e("div",{style:{minHeight:"100vh",padding:"clamp(16px,4vw,40px)"}},
+      e("div",{style:{maxWidth:860,margin:"0 auto"}}, header, body, footer)
+    );
+  }
+
+  try{ ReactDOM.createRoot(document.getElementById("root")).render(e(App)); }
+  catch(err){ boot("Something went wrong starting the app: "+err.message); }
+})();
+</script>
+</body>
+</html>
