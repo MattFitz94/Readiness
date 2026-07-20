@@ -733,6 +733,7 @@
   var app=document.getElementById("app");
   var ouraStatus={state:"idle",msg:""};
   var TAB="today";
+  var TABSCROLL=0;
   var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
 
   function render(savedFlash){
@@ -792,9 +793,14 @@
 
     // tab bar
     var tabbar=document.createElement("div");tabbar.className="tabbar";
+    var activeBtn=null;
     TABS.forEach(function(t){var b=document.createElement("button");b.className="tabbtn"+(TAB===t[0]?" active":"");b.textContent=t[1];
-      b.onclick=function(){TAB=t[0];render(false);};tabbar.appendChild(b);});
+      if(TAB===t[0]) activeBtn=b;
+      b.onclick=function(){ TABSCROLL=tabbar.scrollLeft; TAB=t[0]; render(false); };tabbar.appendChild(b);});
     app.appendChild(tabbar);
+    // restore the horizontal scroll from before the re-render, then nudge the active tab into view
+    tabbar.scrollLeft=TABSCROLL;
+    if(activeBtn&&activeBtn.scrollIntoView){ try{ activeBtn.scrollIntoView({inline:"center",block:"nearest"}); }catch(e){} }
 
     var body=document.createElement("div");app.appendChild(body);
 
