@@ -48,6 +48,9 @@
   .vhead{font-family:'Fraunces',serif;font-size:clamp(26px,6vw,34px);font-weight:600;line-height:1.1;}
   .vbody{font-size:15px;line-height:1.6;margin:16px 0 0;max-width:560px;}
   .conf{display:inline-block;margin-top:14px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:0.04em;}
+  .bigscore{font-family:'Fraunces',serif;font-size:clamp(58px,16vw,88px);font-weight:600;line-height:0.95;font-variant-numeric:tabular-nums;}
+  .scoreout{font-size:18px;font-weight:600;opacity:0.5;}
+  .scoreside{display:flex;flex-direction:column;justify-content:center;}
 
   .reason{background:#0A2028;border:1px solid #123845;border-radius:14px;padding:16px 18px;margin-bottom:16px;}
   .reason h3{margin:0 0 10px;font-family:'Fraunces',serif;font-size:16px;font-weight:600;color:#DCEEF0;}
@@ -287,8 +290,12 @@
       var band=comp>=0.15?"green":(comp>=-0.2?"yellow":"red");
       var hasAnchor=(hBase!==null && hrv!=null);
 
+      // 0-100 readiness score: comp is -1..+1. Map so 50 = baseline/neutral,
+      // with a gentle curve so mid-range days aren't all bunched together.
+      var score100=Math.round(50 + 50*Math.max(-1,Math.min(1, comp*1.15)));
+
       return Object.assign({},row,{hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
-        rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,comp:comp,band:band,
+        rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,comp:comp,score100:score100,band:band,
         reasons:reasons,confidence:confidence,tempFlag:tempFlag,has:hasAnchor});
     });
   }
@@ -357,11 +364,11 @@
     ],LEG);
 
     // daily score bars
-    (function(){var cd=card("Daily fused score","Composite from all sources, \u2212100 to +100. Green \u2265 15, red \u2264 \u221220.");
+    (function(){var cd=card("Daily readiness score","0\u2013100 from all sources fused. Green \u2265 59, amber 39\u201358, red < 39.");
       var cv=mkCanvas(cd,200);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{type:"bar",data:{labels:labels,datasets:[
-        {label:"score",data:rowsB.map(function(d){return Math.round(d.comp*100);}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
-      ]},options:baseOpts({scales:{y:{min:-100,max:100}}})}));})();
+        {label:"score",data:rowsB.map(function(d){return d.score100;}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
+      ]},options:baseOpts({scales:{y:{min:0,max:100}}})}));})();
 
     // resting HR trend
     var hasRhr=rowsB.filter(function(d){return d.rhr!=null;}).length>=2;
@@ -580,8 +587,10 @@
       var v=document.createElement("div");v.className="verdict";
       v.style.background=bs;v.style.border="1px solid "+bc+"55";v.style.boxShadow="0 0 40px -12px "+bc+"66";
       var confColor = today.confidence.indexOf("high")>=0?C.green:today.confidence.indexOf("mixed")>=0?C.amber:C.muted;
-      v.innerHTML='<div class="vtop"><div class="dot" style="background:'+bc+';box-shadow:0 0 24px 2px '+bc+'aa,0 0 0 6px '+bc+'22"></div>'+
-        '<div><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+VERD[today.band].h+'</div></div></div>'+
+      v.innerHTML='<div class="vtop">'+
+        '<div class="bigscore" style="color:'+bc+';text-shadow:0 0 30px '+bc+'66">'+today.score100+'<span class="scoreout">/100</span></div>'+
+        '<div class="scoreside"><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+VERD[today.band].h+'</div></div>'+
+        '</div>'+
         '<p class="vbody">'+VERD[today.band].b+'</p>'+
         '<span class="conf" style="background:'+confColor+'22;color:'+confColor+'">Confidence: '+today.confidence+'</span>';
       body.appendChild(v);
@@ -602,7 +611,7 @@
         stat("Subjective",today.hp_subjective!=null?today.hp_subjective:"\u2014","/ 10",today.hp_subjective!=null?"360HP":"")+
         stat("Oura readiness",today.o_readiness!=null?today.o_readiness:"\u2014","/ 100",today.o_readiness!=null?"Oura":"")+
         stat("Oura sleep",today.o_sleepscore!=null?today.o_sleepscore:"\u2014","/ 100",today.o_sleepscore!=null?"Oura":"")+
-        stat("Fused score",Math.round(today.comp*100),"\u2212100\u2026100","",bc);
+        stat("Readiness","<span style='color:"+bc+"'>"+today.score100+"</span>","/ 100","",bc);
       body.appendChild(st);
 
       var btns=document.createElement("div");btns.className="btnrow";
