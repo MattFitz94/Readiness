@@ -13,63 +13,81 @@
 <link rel="apple-touch-icon" href="apple-touch-icon.png" />
 
 <link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,400;9..144,600&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet" />
 
 <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
 
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background: #04141A;
-    background-image: radial-gradient(120% 80% at 50% -10%, #0A2A34 0%, #061C24 42%, #04141A 100%);
-    background-attachment: fixed;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    -webkit-font-smoothing: antialiased;
-    padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
-    color: #DCEEF0;
+  :root{ color-scheme:dark; }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:#04141A;
+    background-image:radial-gradient(120% 80% at 50% -10%, #0A2A34 0%, #061C24 42%, #04141A 100%);
+    background-attachment:fixed;
+    font-family:'Inter',system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing:antialiased;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom);
+    color:#DCEEF0;
   }
-  .wrap { max-width: 860px; margin: 0 auto; padding: clamp(16px,4vw,40px); }
-  .mono { font-variant-numeric: tabular-nums; }
-  button { font-family: inherit; cursor: pointer; }
-  input { font-family: inherit; }
+  .wrap{max-width:860px;margin:0 auto;padding:clamp(16px,4vw,40px);}
+  .mono{font-variant-numeric:tabular-nums;}
+  button{font-family:inherit;cursor:pointer;}
+  input{font-family:inherit;}
 
-  .head { display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px; margin-bottom:24px; }
-  .title { font-family:'Fraunces',serif; font-size:clamp(28px,7vw,40px); font-weight:600; letter-spacing:-0.02em; text-shadow:0 0 24px rgba(61,224,200,0.25); }
-  .sub { color:#6E9AA0; font-size:14px; margin-top:2px; }
-  .latest { text-align:right; font-size:13px; color:#6E9AA0; }
-  .latest b { color:#DCEEF0; font-size:15px; font-weight:500; }
+  .head{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:20px;}
+  .title{font-family:'Fraunces',serif;font-size:clamp(28px,7vw,40px);font-weight:600;letter-spacing:-0.02em;text-shadow:0 0 24px rgba(61,224,200,0.25);}
+  .sub{color:#6E9AA0;font-size:14px;margin-top:2px;}
+  .latest{text-align:right;font-size:13px;color:#6E9AA0;}
+  .latest b{color:#DCEEF0;font-size:15px;font-weight:500;}
 
-  .verdict { border-radius:18px; padding:clamp(20px,4vw,32px); margin-bottom:20px; }
-  .vtop { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
-  .dot { width:64px; height:64px; border-radius:50%; flex-shrink:0; }
-  .vword { font-variant-numeric:tabular-nums; font-size:12px; letter-spacing:0.14em; font-weight:600; }
-  .vhead { font-family:'Fraunces',serif; font-size:clamp(26px,6vw,34px); font-weight:600; line-height:1.1; }
-  .vbody { font-size:15px; line-height:1.6; margin:16px 0 0; max-width:560px; }
-  .vreason { margin-top:14px; padding:10px 14px; background:rgba(4,20,26,0.55); border-radius:10px; font-size:13.5px; line-height:1.5; }
+  .verdict{border-radius:18px;padding:clamp(20px,4vw,32px);margin-bottom:16px;}
+  .vtop{display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+  .dot{width:64px;height:64px;border-radius:50%;flex-shrink:0;}
+  .vword{font-variant-numeric:tabular-nums;font-size:12px;letter-spacing:0.14em;font-weight:600;}
+  .vhead{font-family:'Fraunces',serif;font-size:clamp(26px,6vw,34px);font-weight:600;line-height:1.1;}
+  .vbody{font-size:15px;line-height:1.6;margin:16px 0 0;max-width:560px;}
+  .conf{display:inline-block;margin-top:14px;padding:5px 12px;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:0.04em;}
 
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:12px; margin-bottom:28px; }
-  .stat { background:#0A2028; border:1px solid #123845; border-radius:12px; padding:14px 16px; }
-  .slabel { font-size:11.5px; color:#6E9AA0; text-transform:uppercase; letter-spacing:0.06em; }
-  .svalue { font-size:26px; font-weight:600; margin-top:4px; font-family:'Fraunces',serif; font-variant-numeric:tabular-nums; }
-  .ssub { font-size:12px; color:#6E9AA0; margin-top:2px; font-variant-numeric:tabular-nums; }
+  .reason{background:#0A2028;border:1px solid #123845;border-radius:14px;padding:16px 18px;margin-bottom:16px;}
+  .reason h3{margin:0 0 10px;font-family:'Fraunces',serif;font-size:16px;font-weight:600;color:#DCEEF0;}
+  .rline{display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid #0E2A34;font-size:13.5px;line-height:1.5;}
+  .rline:last-child{border-bottom:none;}
+  .rico{flex-shrink:0;width:18px;text-align:center;}
+  .rup{color:#2FE6B0;} .rdown{color:#FF6B6B;} .rflat{color:#6E9AA0;} .rwarn{color:#E8B65A;}
 
-  .card { background:#0A2028; border:1px solid #123845; border-radius:14px; padding:18px; margin-bottom:16px; box-shadow:0 1px 0 rgba(61,224,200,0.04) inset; }
-  .ctitle { font-family:'Fraunces',serif; font-size:17px; font-weight:600; }
-  .cnote { color:#6E9AA0; font-size:12.5px; margin:2px 0 12px; line-height:1.5; }
-  .cwrap { position:relative; width:100%; }
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(116px,1fr));gap:12px;margin-bottom:16px;}
+  .stat{background:#0A2028;border:1px solid #123845;border-radius:12px;padding:14px 16px;}
+  .slabel{font-size:11px;color:#6E9AA0;text-transform:uppercase;letter-spacing:0.05em;}
+  .svalue{font-size:24px;font-weight:600;margin-top:4px;font-family:'Fraunces',serif;font-variant-numeric:tabular-nums;}
+  .ssub{font-size:11.5px;color:#6E9AA0;margin-top:2px;font-variant-numeric:tabular-nums;}
+  .ssrc{font-size:10px;color:#3D6B74;margin-top:3px;text-transform:uppercase;letter-spacing:0.06em;}
 
-  .btn { border:none; border-radius:8px; padding:10px 18px; font-size:14px; font-weight:600; }
-  .btn-primary { background:#3DE0C8; color:#04141A; box-shadow:0 0 20px -6px #3DE0C8; }
-  .btn-ghost { background:transparent; color:#6E9AA0; border:1px solid #123845; font-weight:400; }
+  .card{background:#0A2028;border:1px solid #123845;border-radius:14px;padding:18px;margin-bottom:16px;}
+  .ctitle{font-family:'Fraunces',serif;font-size:17px;font-weight:600;}
+  .cnote{color:#6E9AA0;font-size:12.5px;margin:2px 0 12px;line-height:1.5;}
+  .cwrap{position:relative;width:100%;}
 
-  .panel { background:#0A2028; border:1px solid #123845; border-radius:16px; padding:28px; }
-  .foot { margin-top:32px; color:#6E9AA0; font-size:12px; line-height:1.6; border-top:1px solid #123845; padding-top:16px; }
-  input[type=password]{ width:100%; padding:10px 12px; border-radius:8px; border:1px solid #123845; background:#0E2A34; color:#DCEEF0; font-size:14px; }
-  #boot { padding:40px 24px; color:#6E9AA0; font-size:14px; }
-  .saved { background:#0E3A38; color:#2FE6B0; font-size:13px; padding:8px 12px; border-radius:8px; margin-bottom:16px; border:1px solid #2FE6B044; }
-  .err { color:#FF6B6B; font-size:13px; margin-top:14px; }
+  .btn{border:none;border-radius:8px;padding:11px 18px;font-size:14px;font-weight:600;}
+  .btn-primary{background:#3DE0C8;color:#04141A;box-shadow:0 0 20px -6px #3DE0C8;}
+  .btn-ghost{background:transparent;color:#6E9AA0;border:1px solid #123845;font-weight:400;}
+  .btnrow{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;margin-bottom:8px;}
+
+  .sync{display:flex;align-items:center;gap:10px;background:#0A2028;border:1px solid #123845;border-radius:12px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:#6E9AA0;}
+  .sync .dotlive{width:8px;height:8px;border-radius:50%;background:#2FE6B0;box-shadow:0 0 8px #2FE6B0;flex-shrink:0;}
+  .sync .dotoff{width:8px;height:8px;border-radius:50%;background:#E8B65A;flex-shrink:0;}
+  .sync .doterr{width:8px;height:8px;border-radius:50%;background:#FF6B6B;flex-shrink:0;}
+
+  .panel{background:#0A2028;border:1px solid #123845;border-radius:16px;padding:28px;}
+  .foot{margin-top:24px;color:#6E9AA0;font-size:12px;line-height:1.6;border-top:1px solid #123845;padding-top:16px;}
+  input[type=password],input[type=text]{width:100%;padding:11px 12px;border-radius:8px;border:1px solid #123845;background:#0E2A34;color:#DCEEF0;font-size:15px;}
+  label{font-size:13px;font-weight:600;color:#DCEEF0;display:block;margin-bottom:6px;}
+  #boot{padding:40px 24px;color:#6E9AA0;font-size:14px;}
+  .saved{background:#0E3A38;color:#2FE6B0;font-size:13px;padding:8px 12px;border-radius:8px;margin-bottom:16px;border:1px solid #2FE6B044;}
+  .err{color:#FF6B6B;font-size:13px;margin-top:10px;}
+  .tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;padding:2px 7px;border-radius:6px;margin-left:8px;vertical-align:middle;}
+  .tag-360{background:#12384522;color:#57C7FF;border:1px solid #57C7FF44;}
+  .tag-oura{background:#2FE6B01a;color:#2FE6B0;border:1px solid #2FE6B044;}
 </style>
 </head>
 <body>
@@ -83,229 +101,396 @@
 
   var C={ bg:"#04141A",panel:"#0A2028",panel2:"#0E2A34",line:"#123845",ink:"#DCEEF0",muted:"#6E9AA0",
     glow:"#3DE0C8",green:"#2FE6B0",greenSoft:"#0E3A38",amber:"#E8B65A",amberSoft:"#3A3018",
-    red:"#FF6B6B",redSoft:"#3A1C22",hrv:"#57C7FF",hrvBand:"rgba(87,199,255,0.14)",r7:"#2FE6B0",r30:"#8A7DFF" };
-  var STORAGE_KEY="readiness_360hp_rows_v1";
+    red:"#FF6B6B",redSoft:"#3A1C22",hrv:"#57C7FF",hrvBand:"rgba(87,199,255,0.14)",r7:"#2FE6B0",r30:"#8A7DFF",oura:"#2FE6B0",temp:"#E8B65A" };
+
+  // ==== YOUR RELAY ADDRESS ====
+  var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
+
+  var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
+
+  function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+  function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+  function getJSON(k,f){try{var s=localStorage.getItem(k);return s?JSON.parse(s):f;}catch(e){return f;}}
+  function setJSON(k,v){set(k,JSON.stringify(v));}
 
   // ---------- helpers ----------
-  function parseCSV(t){ var L=t.trim().split(/\r?\n/); var H=L[0].split(",").map(function(h){return h.trim();});
-    return L.slice(1).map(function(l){ var p=l.split(","); var o={}; H.forEach(function(h,i){o[h]=(p[i]!=null?p[i]:"").trim();}); return o; }); }
-  function pDate(s){ var p=s.split("-").map(Number); return new Date(p[2],p[1]-1,p[0]); }
-  function fmt(d){ return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"}); }
-  function median(a){ if(!a.length)return null; var s=a.slice().sort(function(x,y){return x-y;}); var m=Math.floor(s.length/2); return s.length%2?s[m]:(s[m-1]+s[m])/2; }
-  function mean(a){ if(!a.length)return null; return a.reduce(function(x,y){return x+y;},0)/a.length; }
-  function stdev(a){ if(a.length<2)return null; var m=mean(a); return Math.sqrt(mean(a.map(function(v){return (v-m)*(v-m);}))); }
-  function pearson(xs,ys){ var n=xs.length; if(n<4)return null; var mx=mean(xs),my=mean(ys),nu=0,dx=0,dy=0;
-    for(var i=0;i<n;i++){var a=xs[i]-mx,b=ys[i]-my;nu+=a*b;dx+=a*a;dy+=b*b;} if(!dx||!dy)return null; return nu/Math.sqrt(dx*dy); }
-  function r1(v){ return v==null?null:Math.round(v*10)/10; }
+  function parseCSV(t){var L=t.trim().split(/\r?\n/);var H=L[0].split(",").map(function(h){return h.trim();});
+    return L.slice(1).map(function(l){var p=l.split(",");var o={};H.forEach(function(h,i){o[h]=(p[i]!=null?p[i]:"").trim();});return o;});}
+  function pDate(s){var p=s.split("-").map(Number);return new Date(p[2],p[1]-1,p[0]);}       // DD-MM-YYYY (360HP)
+  function isoDate(d){return d.toISOString().slice(0,10);}                                    // YYYY-MM-DD
+  function fmt(d){return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"});}
+  function median(a){if(!a.length)return null;var s=a.slice().sort(function(x,y){return x-y;});var m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;}
+  function mean(a){if(!a.length)return null;return a.reduce(function(x,y){return x+y;},0)/a.length;}
+  function stdev(a){if(a.length<2)return null;var m=mean(a);return Math.sqrt(mean(a.map(function(v){return (v-m)*(v-m);})));}
+  function pearson(xs,ys){var n=xs.length;if(n<4)return null;var mx=mean(xs),my=mean(ys),nu=0,dx=0,dy=0;
+    for(var i=0;i<n;i++){var a=xs[i]-mx,b=ys[i]-my;nu+=a*b;dx+=a*a;dy+=b*b;}if(!dx||!dy)return null;return nu/Math.sqrt(dx*dy);}
+  function r1(v){return v==null?null:Math.round(v*10)/10;}
 
-  // ---------- model ----------
-  function buildModel(rows){
-    var data=rows.filter(function(r){return r.date&&r.rMSSD;}).map(function(r){
-      return { date:pDate(r.date),dateStr:r.date,hrv:parseFloat(r.rMSSD),
-        rhr:r.RHR?parseFloat(r.RHR):null,subjective:r.subjective?parseFloat(r.subjective):null,
-        sleep:r.sleep?parseFloat(r.sleep):null,energy:r.energy?parseFloat(r.energy):null,
-        tags:(r.tags||"").trim(),note:(r.note||"").trim() };
-    }).sort(function(a,b){return a.date-b.date;});
-    var W=7, flags=["pain","fatigue","ill","sick","injur","lock"];
-    return data.map(function(row,i){
-      var prior=data.slice(Math.max(0,i-W),i);
-      var hp=prior.map(function(p){return p.hrv;}).filter(isFinite);
-      var rp=prior.map(function(p){return p.rhr;}).filter(isFinite);
-      var hBase=hp.length>=3?median(hp):null, rBase=rp.length>=3?median(rp):null, hSd=hp.length>=3?stdev(hp):null;
-      var hDev=hBase?(row.hrv-hBase)/hBase:null;
-      var w7=data.slice(Math.max(0,i-6),i+1).map(function(p){return p.hrv;}).filter(isFinite);
-      var w30=data.slice(Math.max(0,i-29),i+1).map(function(p){return p.hrv;}).filter(isFinite);
+  // ---------- data fusion ----------
+  // Build a per-day map keyed by YYYY-MM-DD merging 360HP rows + Oura cache.
+  function fuse(){
+    var rows360=getJSON(K_ROWS,null);
+    var oura=getJSON(K_OURA,null); // {readiness:[],daily_sleep:[],sleep_detail:{}}
+    var days={};
+
+    if(rows360){
+      rows360.forEach(function(r){
+        if(!r.date||!r.rMSSD) return;
+        var iso=isoDate(pDate(r.date));
+        days[iso]=days[iso]||{iso:iso};
+        days[iso].hp_hrv=parseFloat(r.rMSSD);
+        days[iso].hp_rhr=r.RHR?parseFloat(r.RHR):null;
+        days[iso].hp_subjective=r.subjective?parseFloat(r.subjective):null;
+        days[iso].hp_sleep=r.sleep?parseFloat(r.sleep):null;
+        days[iso].tags=(r.tags||"").trim(); days[iso].note=(r.note||"").trim();
+      });
+    }
+    if(oura){
+      (oura.readiness||[]).forEach(function(r){
+        var d=days[r.day]=days[r.day]||{iso:r.day};
+        d.o_readiness=r.score!=null?r.score:null;
+        d.o_tempdev=r.temperature_deviation!=null?r.temperature_deviation:null;
+        if(r.contributors){ d.o_hrvbal=r.contributors.hrv_balance; d.o_rhrcontrib=r.contributors.resting_heart_rate; }
+      });
+      (oura.daily_sleep||[]).forEach(function(r){
+        var d=days[r.day]=days[r.day]||{iso:r.day};
+        d.o_sleepscore=r.score!=null?r.score:null;
+      });
+      var det=oura.sleep_detail||{};
+      Object.keys(det).forEach(function(day){
+        var d=days[day]=days[day]||{iso:day};
+        d.o_hrv=det[day].average_hrv;          // raw ms — comparable to 360HP
+        d.o_rhr=det[day].lowest_heart_rate!=null?det[day].lowest_heart_rate:det[day].average_heart_rate;
+        d.o_sleephrs=det[day].total_sleep_hours;
+      });
+    }
+    // to sorted array
+    var arr=Object.keys(days).sort().map(function(k){return days[k];});
+    return arr;
+  }
+
+  // rolling-baseline signal engine with 360HP as HRV anchor + Oura fusion
+  function analyze(arr){
+    var W=7;
+    return arr.map(function(row,i){
+      var prior=arr.slice(Math.max(0,i-W),i);
+
+      // choose HRV anchor: prefer 360HP, fall back to Oura raw HRV
+      function hrvOf(d){ return d.hp_hrv!=null?d.hp_hrv:(d.o_hrv!=null?d.o_hrv:null); }
+      var hrv=hrvOf(row), hrvSrc=row.hp_hrv!=null?"360HP":(row.o_hrv!=null?"Oura":null);
+      var hp=prior.map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
+      var hBase=hp.length>=3?median(hp):null, hSd=hp.length>=3?stdev(hp):null;
+      var hDev=(hBase&&hrv!=null)?(hrv-hBase)/hBase:null;
+
+      // resting HR: prefer 360HP, else Oura
+      var rhr=row.hp_rhr!=null?row.hp_rhr:(row.o_rhr!=null?row.o_rhr:null);
+      var rhrSrc=row.hp_rhr!=null?"360HP":(row.o_rhr!=null?"Oura":null);
+      var rp=prior.map(function(d){return d.hp_rhr!=null?d.hp_rhr:d.o_rhr;}).filter(function(v){return v!=null&&isFinite(v);});
+      var rBase=rp.length>=3?median(rp):null;
+
+      // rolling avgs of HRV anchor
+      var w7=arr.slice(Math.max(0,i-6),i+1).map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
+      var w30=arr.slice(Math.max(0,i-29),i+1).map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
       var roll7=w7.length>=3?mean(w7):null, roll30=w30.length>=5?mean(w30):null;
-      var hs=0,rs=0,ss=0;
-      if(hDev!==null)hs=Math.max(-1,Math.min(1,hDev/0.15));
-      if(rBase&&row.rhr){var rd=(row.rhr-rBase)/rBase;rs=Math.max(-1,Math.min(1,-rd/0.08));}
-      if(row.subjective!==null)ss=Math.max(-1,Math.min(1,(row.subjective-7.5)/2));
-      var wH=hDev!==null?0.55:0,wS=row.subjective!==null?0.30:0,wR=(rBase&&row.rhr)?0.15:0,sum=wH+wS+wR||1;
-      var comp=(hs*wH+ss*wS+rs*wR)/sum;
-      var text=(row.tags+" "+row.note).toLowerCase(), ov=null;
-      if(flags.some(function(w){return text.indexOf(w)>=0;})){comp=Math.min(comp,-0.5);ov="flag";}
+
+      // ---- component sub-scores (-1 bad .. +1 good) ----
+      var reasons=[];
+      var parts=[], weights=[];
+
+      if(hDev!==null){
+        var hScore=Math.max(-1,Math.min(1,hDev/0.15));
+        parts.push(hScore); weights.push(0.45);
+        var pct=Math.round(hDev*100);
+        reasons.push({dir:hScore>0.15?"up":hScore<-0.15?"down":"flat",
+          txt:"HRV "+(pct>=0?"+":"")+pct+"% vs baseline"+(hrvSrc?" ("+hrvSrc+")":"")});
+      }
+      if(row.hp_subjective!=null){
+        var sScore=Math.max(-1,Math.min(1,(row.hp_subjective-7.5)/2));
+        parts.push(sScore); weights.push(0.28);
+        reasons.push({dir:sScore>0.2?"up":sScore<-0.2?"down":"flat", txt:"Subjective "+row.hp_subjective+"/10 (360HP)"});
+      }
+      if(rBase&&rhr!=null){
+        var rd=(rhr-rBase)/rBase; var rScore=Math.max(-1,Math.min(1,-rd/0.08));
+        parts.push(rScore); weights.push(0.12);
+        var rdiff=Math.round(rhr-rBase);
+        if(Math.abs(rdiff)>=2) reasons.push({dir:rScore>0?"up":"down", txt:"Resting HR "+(rdiff>0?"+":"")+rdiff+" bpm"+(rhrSrc?" ("+rhrSrc+")":"")});
+      }
+      if(row.o_readiness!=null){
+        var oScore=Math.max(-1,Math.min(1,(row.o_readiness-75)/15));
+        parts.push(oScore); weights.push(0.09);
+        reasons.push({dir:oScore>0.2?"up":oScore<-0.2?"down":"flat", txt:"Oura readiness "+row.o_readiness});
+      }
+      if(row.o_sleepscore!=null){
+        var slScore=Math.max(-1,Math.min(1,(row.o_sleepscore-75)/18));
+        parts.push(slScore); weights.push(0.06);
+        if(row.o_sleepscore<70||row.o_sleepscore>=88) reasons.push({dir:slScore>0?"up":"down", txt:"Oura sleep "+row.o_sleepscore});
+      }
+
+      // weighted composite
+      var wsum=weights.reduce(function(a,b){return a+b;},0)||1;
+      var comp=0; for(var k=0;k<parts.length;k++) comp+=parts[k]*weights[k]; comp/=wsum;
+
+      // ---- temperature warning (illness/stress early flag) ----
+      var tempFlag=false;
+      if(row.o_tempdev!=null && row.o_tempdev>=0.5){
+        tempFlag=true; comp=Math.min(comp,comp-0.25);
+        reasons.push({dir:"warn", txt:"Body temp +"+row.o_tempdev.toFixed(1)+"°C above normal — possible illness/stress"});
+      }
+
+      // ---- subjective override: a rough morning pulls toward caution on its own ----
+      if(row.hp_subjective!=null){
+        if(row.hp_subjective<=5){
+          comp=Math.min(comp,-0.35);
+          reasons.push({dir:"warn", txt:"Subjective "+row.hp_subjective+"/10 is low — capped toward recover regardless of other signals"});
+        } else if(row.hp_subjective<=6.5){
+          comp=Math.min(comp,-0.05);
+          reasons.push({dir:"warn", txt:"Subjective "+row.hp_subjective+"/10 is down — held to moderate at best today"});
+        }
+      }
+
+      // ---- tag override (pain/illness in 360HP notes) ----
+      var text=((row.tags||"")+" "+(row.note||"")).toLowerCase();
+      if(["pain","fatigue","ill","sick","injur","lock"].some(function(w){return text.indexOf(w)>=0;})){
+        comp=Math.min(comp,-0.5);
+        reasons.push({dir:"warn", txt:"Flagged in notes: "+(row.tags||row.note)});
+      }
+
+      // ---- agreement / disagreement between 360HP HRV and Oura readiness ----
+      var confidence="single source";
+      if(hDev!==null && row.o_readiness!=null){
+        var hpPos=hDev>0.03, hpNeg=hDev<-0.03;
+        var ouPos=row.o_readiness>=78, ouNeg=row.o_readiness<70;
+        if((hpPos&&ouPos)||(hpNeg&&ouNeg)) confidence="high — sources agree";
+        else if((hpPos&&ouNeg)||(hpNeg&&ouPos)){
+          confidence="mixed — sources disagree";
+          comp=comp>0?comp*0.5:comp*0.7; // pull toward neutral/caution on conflict
+          reasons.push({dir:"warn", txt:"360HP HRV and Oura disagree today — easing the call toward caution"});
+        } else confidence="moderate";
+      }
+
       var band=comp>=0.15?"green":(comp>=-0.2?"yellow":"red");
-      return Object.assign({},row,{hBase:hBase,rBase:rBase,hSd:hSd,hDev:hDev,roll7:roll7,roll30:roll30,comp:comp,band:band,ov:ov,has:hBase!==null});
+      var hasAnchor=(hBase!==null && hrv!=null);
+
+      return Object.assign({},row,{hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
+        rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,comp:comp,band:band,
+        reasons:reasons,confidence:confidence,tempFlag:tempFlag,has:hasAnchor});
     });
   }
 
-  function reasonFor(d){
-    if(!d.has) return "Not enough history yet to set your baseline — need ~3 prior days.";
-    var b=[],pct=Math.round(d.hDev*100);
-    if(pct>=8)b.push("HRV "+pct+"% above your 7-day baseline");
-    else if(pct<=-8)b.push("HRV "+Math.abs(pct)+"% below baseline");
-    else b.push("HRV close to baseline ("+(pct>=0?"+":"")+pct+"%)");
-    if(d.subjective!=null){ if(d.subjective>=8.5)b.push("strong subjective read"); else if(d.subjective<=7)b.push("subjective read is low"); }
-    if(d.rBase&&d.rhr){ var rd=Math.round(d.rhr-d.rBase); if(rd>=4)b.push("resting HR up "+rd+" bpm"); else if(rd<=-3)b.push("resting HR down "+Math.abs(rd)+" bpm"); }
-    if(d.ov==="flag")b.push("flagged: "+(d.tags||"note"));
-    return b.join(" · ");
-  }
-  function corrWord(r){ var a=Math.abs(r); var s=a<0.2?"essentially no link":a<0.4?"a weak link":a<0.6?"a moderate link":"a strong link";
-    var dir=r>=0?"better sleep tends to mean higher HRV":"higher sleep scores track lower HRV here"; return s+" ("+dir+")"; }
-
   var VERD={ green:{w:"GREEN",h:"Push",b:"Body's ready. Good day for a hard session or heavy practice load."},
-    yellow:{w:"YELLOW",h:"Moderate",b:"Middle ground. Technical work, skills, or a moderate session — leave the max effort for a green day."},
+    yellow:{w:"YELLOW",h:"Moderate",b:"Middle ground. Technical work, skills, or a moderate session — leave max effort for a green day."},
     red:{w:"RED",h:"Recover",b:"Signals are down. Rest, mobility, or light recovery. Pushing today digs the hole deeper."} };
 
-  // ---------- chart factory ----------
-  var CHARTS=[];
-  function destroyCharts(){ CHARTS.forEach(function(c){try{c.destroy();}catch(e){}}); CHARTS=[]; }
-  var haveChart = (typeof window.Chart !== "undefined");
-
-  function baseOpts(extra){
-    var o={ responsive:true, maintainAspectRatio:false, interaction:{intersect:false,mode:"index"},
-      plugins:{ legend:{display:false}, tooltip:{ backgroundColor:C.panel2, borderColor:C.line, borderWidth:1, titleColor:C.muted, bodyColor:C.ink } },
-      scales:{ x:{ grid:{color:C.line,drawTicks:false}, ticks:{color:C.muted,maxRotation:0,autoSkip:true,maxTicksLimit:6}, border:{color:C.line} },
-               y:{ grid:{color:C.line,drawTicks:false}, ticks:{color:C.muted}, border:{display:false} } } };
-    if(extra) deepMerge(o,extra); return o;
+  // ---------- Oura fetch ----------
+  function fetchOura(cb){
+    if(!WORKER_URL || WORKER_URL.indexOf("http")!==0){ cb({error:"No relay URL set"}); return; }
+    var ctrl=new AbortController(); var to=setTimeout(function(){ctrl.abort();},12000);
+    fetch(WORKER_URL,{signal:ctrl.signal}).then(function(r){return r.json();}).then(function(d){
+      clearTimeout(to);
+      if(d.error){ cb({error:d.error}); return; }
+      setJSON(K_OURA,{readiness:d.readiness||[],daily_sleep:d.daily_sleep||[],sleep_detail:d.sleep_detail||{}});
+      set(K_OURATIME,String(Date.now()));
+      cb({ok:true});
+    }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out reaching Oura":e.message}); });
   }
-  function deepMerge(t,s){ for(var k in s){ if(s[k]&&typeof s[k]==="object"&&!Array.isArray(s[k])){ t[k]=t[k]||{}; deepMerge(t[k],s[k]); } else t[k]=s[k]; } return t; }
 
-  function mkCanvas(parent,h){ var w=document.createElement("div"); w.className="cwrap"; w.style.height=h+"px";
-    var cv=document.createElement("canvas"); w.appendChild(cv); parent.appendChild(w); return cv; }
-  function card(title,note){ var d=document.createElement("div"); d.className="card";
-    var t=document.createElement("div"); t.className="ctitle"; t.textContent=title; d.appendChild(t);
-    if(note){ var n=document.createElement("div"); n.className="cnote"; n.textContent=note; d.appendChild(n);} return d; }
+  // ---------- charts ----------
+  var CHARTS=[];
+  function destroyCharts(){CHARTS.forEach(function(c){try{c.destroy();}catch(e){}});CHARTS=[];}
+  function mkCanvas(p,h){var w=document.createElement("div");w.className="cwrap";w.style.height=h+"px";var cv=document.createElement("canvas");w.appendChild(cv);p.appendChild(w);return cv;}
+  function card(t,n){var d=document.createElement("div");d.className="card";var x=document.createElement("div");x.className="ctitle";x.textContent=t;d.appendChild(x);if(n){var y=document.createElement("div");y.className="cnote";y.textContent=n;d.appendChild(y);}return d;}
+  function baseOpts(extra){var o={responsive:true,maintainAspectRatio:false,interaction:{intersect:false,mode:"index"},
+    plugins:{legend:{display:false},tooltip:{backgroundColor:C.panel2,borderColor:C.line,borderWidth:1,titleColor:C.muted,bodyColor:C.ink}},
+    scales:{x:{grid:{color:C.line,drawTicks:false},ticks:{color:C.muted,maxRotation:0,autoSkip:true,maxTicksLimit:6},border:{color:C.line}},
+            y:{grid:{color:C.line,drawTicks:false},ticks:{color:C.muted},border:{display:false}}}};
+    if(extra) deepMerge(o,extra); return o;}
+  function deepMerge(t,s){for(var k in s){if(s[k]&&typeof s[k]==="object"&&!Array.isArray(s[k])){t[k]=t[k]||{};deepMerge(t[k],s[k]);}else t[k]=s[k];}return t;}
 
-  function renderCharts(container, model){
+  function renderCharts(container,model){
     destroyCharts();
     var rowsB=model.filter(function(d){return d.has;});
-    var labels=rowsB.map(function(d){return fmt(new Date(d.date));});
-
-    if(!haveChart){
-      var c=document.createElement("div"); c.className="card";
-      c.style.color=C.muted; c.style.fontSize="13px"; c.style.lineHeight="1.6";
-      c.textContent="Charts didn't load this time. Your verdict and numbers above are correct — pull down to refresh and the graphs should appear.";
-      container.appendChild(c); return;
+    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    if(typeof window.Chart==="undefined"){
+      var c=document.createElement("div");c.className="card";c.style.color=C.muted;c.style.fontSize="13px";
+      c.textContent="Charts didn't load this time. Your verdict and numbers above are correct — pull down to refresh.";
+      container.appendChild(c);return;
     }
+    Chart.defaults.font.family="Inter, system-ui, sans-serif"; Chart.defaults.color=C.muted;
 
-    Chart.defaults.font.family="Inter, system-ui, sans-serif";
-    Chart.defaults.color=C.muted;
-
-    // 1. HRV vs baseline
-    (function(){ var cd=card("HRV vs your rolling baseline","Moonlit line is daily HRV; dashed is your 7-day baseline. Distance from it drives the score.");
-      var cv=mkCanvas(cd,240); container.appendChild(cd);
+    // 1. HRV vs baseline (anchor)
+    (function(){var cd=card("HRV vs your rolling baseline","Daily HRV (360HP where available, else Oura) against your 7-day baseline.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:[
-        {label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),borderColor:C.hrv,backgroundColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3},
+        {label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3},
         {label:"baseline",data:rowsB.map(function(d){return r1(d.hBase);}),borderColor:C.muted,borderWidth:1,borderDash:[4,3],pointRadius:0,tension:0.3}
-      ]},options:baseOpts()})); })();
+      ]},options:baseOpts()}));})();
 
-    // 2. HRV + variability band
-    (function(){ var cd=card("HRV trend with variability band","Shaded band is your normal day-to-day swing (±1 SD around baseline). Inside = normal noise; breaking below = a real dip worth respecting.");
-      var cv=mkCanvas(cd,240); container.appendChild(cd);
+    // 2. variability band
+    (function(){var cd=card("HRV trend with variability band","Shaded band is your normal swing (±1 SD). Breaking below it = a real dip, not noise.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
       var up=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase+d.hSd):null;});
       var lo=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase-d.hSd):null;});
       CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:[
-        {label:"band upper",data:up,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:"+1"},
-        {label:"band lower",data:lo,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:false},
+        {label:"upper",data:up,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:"+1"},
+        {label:"lower",data:lo,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:false},
         {label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3}
-      ]},options:baseOpts()})); })();
+      ]},options:baseOpts()}));})();
 
     // 3. rolling 7 vs 30
-    (function(){ var cd=card("Rolling 7-day vs 30-day HRV","When the fast (7-day) line drops below the slow (30-day) line, fatigue is building before you feel it. Climbing back above = absorbing load well.");
-      var cv=mkCanvas(cd,220); container.appendChild(cd);
+    (function(){var cd=card("Rolling 7-day vs 30-day HRV","When the fast line dips below the slow line, fatigue is building before you feel it.");
+      var cv=mkCanvas(cd,220);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:[
         {label:"7-day",data:rowsB.map(function(d){return r1(d.roll7);}),borderColor:C.r7,borderWidth:2.4,pointRadius:0,tension:0.35},
         {label:"30-day",data:rowsB.map(function(d){return r1(d.roll30);}),borderColor:C.r30,borderWidth:2.4,pointRadius:0,tension:0.35}
-      ]},options:baseOpts({plugins:{legend:{display:true,labels:{color:C.muted,boxWidth:12,usePointStyle:true}}}})})); })();
+      ]},options:baseOpts({plugins:{legend:{display:true,labels:{color:C.muted,boxWidth:12,usePointStyle:true}}}})}));})();
 
-    // 4. daily score (colored bars)
-    (function(){ var cd=card("Daily score","Composite readiness, −100 to +100. Green ≥ 15, red ≤ −20.");
-      var cv=mkCanvas(cd,200); container.appendChild(cd);
+    // 4. 360HP vs Oura HRV agreement (both raw ms, where both exist)
+    (function(){
+      var both=model.filter(function(d){return d.hp_hrv!=null&&d.o_hrv!=null;});
+      if(both.length>=2){
+        var cd=card("360HP vs Oura HRV","Both raw HRV (ms) on the same days. Close lines = your two sources agree; gaps = they diverge.");
+        var cv=mkCanvas(cd,220);container.appendChild(cd);
+        var lbl=both.map(function(d){return fmt(new Date(d.iso));});
+        CHARTS.push(new Chart(cv,{type:"line",data:{labels:lbl,datasets:[
+          {label:"360HP",data:both.map(function(d){return r1(d.hp_hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:2,tension:0.3},
+          {label:"Oura",data:both.map(function(d){return r1(d.o_hrv);}),borderColor:C.oura,borderWidth:2.4,pointRadius:2,tension:0.3}
+        ]},options:baseOpts({plugins:{legend:{display:true,labels:{color:C.muted,boxWidth:12,usePointStyle:true}}}})}));
+      }
+    })();
+
+    // 5. daily score bars
+    (function(){var cd=card("Daily fused score","Composite from all sources, −100 to +100. Green ≥ 15, red ≤ −20.");
+      var cv=mkCanvas(cd,200);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{type:"bar",data:{labels:labels,datasets:[
         {label:"score",data:rowsB.map(function(d){return Math.round(d.comp*100);}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
-      ]},options:baseOpts({scales:{y:{min:-100,max:100}}})})); })();
+      ]},options:baseOpts({scales:{y:{min:-100,max:100}}})}));})();
 
-    // 5. sleep vs HRV scatter
-    (function(){ var pts=model.filter(function(d){return d.sleep!=null&&isFinite(d.hrv);}).map(function(d){return {x:d.sleep,y:r1(d.hrv)};});
-      var r=null; if(pts.length>=4){ r=pearson(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;})); }
-      var note=r!=null?("Each dot is a day: sleep quality (x) vs same-day HRV (y). Correlation r = "+r.toFixed(2)+" — "+corrWord(r)+"."):"Each dot is a day: sleep quality (x) vs same-day HRV (y). Need a few more days to compute the correlation.";
-      var cd=card("Does sleep predict your HRV?",note); var cv=mkCanvas(cd,240); container.appendChild(cd);
-      CHARTS.push(new Chart(cv,{type:"scatter",data:{datasets:[{label:"day",data:pts,backgroundColor:C.glow,pointRadius:4,pointHoverRadius:6}]},
-        options:baseOpts({scales:{x:{min:0.5,max:4.5,ticks:{stepSize:1},title:{display:true,text:"sleep score",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})})); })();
-
-    // 6. subjective vs RHR (dual axis)
-    (function(){ var cd=card("Subjective vs resting HR","Morning subjective score against resting heart rate.");
-      var cv=mkCanvas(cd,200); container.appendChild(cd);
-      CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:[
-        {label:"subjective",data:rowsB.map(function(d){return d.subjective;}),borderColor:C.green,borderWidth:2,pointRadius:0,tension:0.3,yAxisID:"y"},
-        {label:"resting HR",data:rowsB.map(function(d){return d.rhr;}),borderColor:C.red,borderWidth:2,pointRadius:0,tension:0.3,yAxisID:"y1"}
-      ]},options:baseOpts({plugins:{legend:{display:true,labels:{color:C.muted,boxWidth:12,usePointStyle:true}}},
-        scales:{y:{min:5,max:10,position:"left"},y1:{min:45,max:85,position:"right",grid:{drawOnChartArea:false}}}})})); })();
+    // 6. Oura readiness + temp (dual axis) — only if oura present
+    (function(){
+      var withO=rowsB.filter(function(d){return d.o_readiness!=null||d.o_tempdev!=null;});
+      if(withO.length>=2){
+        var cd=card("Oura readiness & body temperature","Readiness score with body-temperature deviation. A temp spike often precedes a bad stretch.");
+        var cv=mkCanvas(cd,200);container.appendChild(cd);
+        CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:[
+          {label:"readiness",data:rowsB.map(function(d){return d.o_readiness;}),borderColor:C.oura,borderWidth:2,pointRadius:0,tension:0.3,yAxisID:"y"},
+          {label:"temp Δ°C",data:rowsB.map(function(d){return d.o_tempdev;}),borderColor:C.temp,borderWidth:2,pointRadius:0,tension:0.3,yAxisID:"y1"}
+        ]},options:baseOpts({plugins:{legend:{display:true,labels:{color:C.muted,boxWidth:12,usePointStyle:true}}},
+          scales:{y:{min:40,max:100,position:"left"},y1:{position:"right",grid:{drawOnChartArea:false}}}})}));
+      }
+    })();
   }
 
-  // ---------- render app ----------
+  // ---------- app render ----------
   var app=document.getElementById("app");
-  function getRows(){ try{ var s=localStorage.getItem(STORAGE_KEY); return s?JSON.parse(s):null; }catch(e){ return null; } }
-  function saveRows(r){ try{ localStorage.setItem(STORAGE_KEY,JSON.stringify(r)); }catch(e){} }
+  var ouraStatus={state:"idle",msg:""}; // idle|loading|ok|off|err
 
   function render(savedFlash){
-    var rows=getRows();
-    var model=rows?buildModel(rows):null;
-    var today=(model&&model.length)?model[model.length-1]:null;
+    var arr=fuse();
+    var model=arr.length?analyze(arr):[];
+    var today=model.length?model[model.length-1]:null;
     app.innerHTML="";
 
-    var head=document.createElement("div"); head.className="head";
-    head.innerHTML='<div><div class="title">Readiness</div><div class="sub">HRV-led daily training signal</div></div>'+
-      (today?'<div class="latest">Latest reading<br><b class="mono">'+today.dateStr+'</b></div>':'');
+    var head=document.createElement("div");head.className="head";
+    head.innerHTML='<div><div class="title">Readiness</div><div class="sub">Fused HRV signal — 360HP + Oura</div></div>'+
+      (today?'<div class="latest">Latest reading<br><b class="mono">'+today.iso+'</b></div>':'');
     app.appendChild(head);
 
-    var fileInput=document.createElement("input"); fileInput.type="file"; fileInput.accept=".csv"; fileInput.style.display="none";
-    fileInput.addEventListener("change",function(ev){ var f=ev.target.files&&ev.target.files[0]; if(!f)return;
-      var rd=new FileReader(); rd.onload=function(x){ try{ var p=parseCSV(x.target.result);
-        if(!p.length||!("rMSSD" in p[0])){ alert("That file doesn't look like a 360HP export — no rMSSD column found."); return; }
-        saveRows(p); render(true);
-      }catch(e){ alert("Couldn't read that file. Make sure it's the raw 360HP CSV export."); } };
-      rd.readAsText(f); });
+    // file input
+    var fileInput=document.createElement("input");fileInput.type="file";fileInput.accept=".csv";fileInput.style.display="none";
+    fileInput.addEventListener("change",function(ev){var f=ev.target.files&&ev.target.files[0];if(!f)return;
+      var rd=new FileReader();rd.onload=function(x){try{var p=parseCSV(x.target.result);
+        if(!p.length||!("rMSSD" in p[0])){alert("That file doesn't look like a 360HP export — no rMSSD column found.");return;}
+        setJSON(K_ROWS,p);render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
+      rd.readAsText(f);});
     app.appendChild(fileInput);
 
-    if(savedFlash){ var sv=document.createElement("div"); sv.className="saved"; sv.textContent="Saved to this device — your history will be here next time you open the app."; app.appendChild(sv);
-      setTimeout(function(){ if(sv.parentNode) sv.parentNode.removeChild(sv); },2600); }
+    if(savedFlash){var sv=document.createElement("div");sv.className="saved";sv.textContent="Saved to this device.";app.appendChild(sv);
+      setTimeout(function(){if(sv.parentNode)sv.parentNode.removeChild(sv);},2200);}
 
-    if(today){
+    // sync status bar
+    var sync=document.createElement("div");sync.className="sync";
+    var tt=get(K_OURATIME); var when=tt?new Date(parseInt(tt,10)):null;
+    var dotClass=ouraStatus.state==="ok"||getJSON(K_OURA,null)?"dotlive":(ouraStatus.state==="err"?"doterr":"dotoff");
+    var syncMsg;
+    if(ouraStatus.state==="loading") syncMsg="Syncing with Oura…";
+    else if(ouraStatus.state==="err") syncMsg="Oura sync issue: "+ouraStatus.msg;
+    else if(getJSON(K_OURA,null)) syncMsg="Oura connected"+(when?" · updated "+when.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"");
+    else syncMsg="Oura not synced yet";
+    sync.innerHTML='<span class="'+dotClass+'"></span><span>'+syncMsg+'</span>';
+    var refresh=document.createElement("button");refresh.className="btn btn-ghost";refresh.style.marginLeft="auto";refresh.style.padding="6px 12px";refresh.textContent="Sync Oura";
+    refresh.onclick=function(){ ouraStatus={state:"loading",msg:""}; render(false);
+      fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); }); };
+    sync.appendChild(refresh);
+    app.appendChild(sync);
+
+    if(today && today.has){
       var bc=C[today.band], bs=C[today.band+"Soft"];
-      var v=document.createElement("div"); v.className="verdict";
-      v.style.background=bs; v.style.border="1px solid "+bc+"55"; v.style.boxShadow="0 0 40px -12px "+bc+"66";
+      var v=document.createElement("div");v.className="verdict";
+      v.style.background=bs;v.style.border="1px solid "+bc+"55";v.style.boxShadow="0 0 40px -12px "+bc+"66";
+      var confColor = today.confidence.indexOf("high")>=0?C.green:today.confidence.indexOf("mixed")>=0?C.amber:C.muted;
       v.innerHTML='<div class="vtop"><div class="dot" style="background:'+bc+';box-shadow:0 0 24px 2px '+bc+'aa,0 0 0 6px '+bc+'22"></div>'+
         '<div><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+VERD[today.band].h+'</div></div></div>'+
         '<p class="vbody">'+VERD[today.band].b+'</p>'+
-        '<div class="vreason">'+reasonFor(today)+'</div>';
+        '<span class="conf" style="background:'+confColor+'22;color:'+confColor+'">Confidence: '+today.confidence+'</span>';
       app.appendChild(v);
 
-      var st=document.createElement("div"); st.className="stats";
-      function stat(l,val,sub,col){ return '<div class="stat"><div class="slabel">'+l+'</div><div class="svalue" style="color:'+(col||C.ink)+'">'+val+'</div>'+(sub?'<div class="ssub">'+sub+'</div>':'')+'</div>'; }
-      st.innerHTML = stat("HRV (rMSSD)",today.hrv.toFixed(1),today.hBase?("base "+today.hBase.toFixed(0)):"",C.hrv)+
-        stat("Resting HR",today.rhr!=null?today.rhr:"—",today.rBase?("base "+today.rBase.toFixed(0)):"")+
-        stat("Subjective",today.subjective!=null?today.subjective:"—","/ 10")+
-        stat("Score",Math.round(today.comp*100),"−100…100",bc);
+      // transparent reasoning
+      var rc=document.createElement("div");rc.className="reason";
+      rc.innerHTML='<h3>Why this signal</h3>';
+      if(today.reasons.length){
+        today.reasons.forEach(function(r){
+          var cls=r.dir==="up"?"rup":r.dir==="down"?"rdown":r.dir==="warn"?"rwarn":"rflat";
+          var ico=r.dir==="up"?"▲":r.dir==="down"?"▼":r.dir==="warn"?"⚠":"•";
+          var line=document.createElement("div");line.className="rline";
+          line.innerHTML='<span class="rico '+cls+'">'+ico+'</span><span>'+r.txt+'</span>';
+          rc.appendChild(line);
+        });
+      } else { var e=document.createElement("div");e.className="rline";e.textContent="Not enough context yet to explain — add more history.";rc.appendChild(e); }
+      app.appendChild(rc);
+
+      // stats
+      var st=document.createElement("div");st.className="stats";
+      function stat(l,val,sub,src,col){return '<div class="stat"><div class="slabel">'+l+'</div><div class="svalue" style="color:'+(col||C.ink)+'">'+val+'</div>'+(sub?'<div class="ssub">'+sub+'</div>':'')+(src?'<div class="ssrc">'+src+'</div>':'')+'</div>';}
+      st.innerHTML=stat("HRV",today.hrv!=null?today.hrv.toFixed(1):"—",today.hBase?("base "+today.hBase.toFixed(0)):"",today.hrvSrc||"",C.hrv)+
+        stat("Resting HR",today.rhr!=null?today.rhr:"—",today.rBase?("base "+today.rBase.toFixed(0)):"",today.hrvSrc==="360HP"&&today.hp_rhr!=null?"360HP":(today.o_rhr!=null?"Oura":""))+
+        stat("Oura readiness",today.o_readiness!=null?today.o_readiness:"—","/ 100",today.o_readiness!=null?"Oura":"")+
+        stat("Fused score",Math.round(today.comp*100),"−100…100","",bc);
       app.appendChild(st);
 
-      var charts=document.createElement("div"); app.appendChild(charts);
-      renderCharts(charts, model);
+      var charts=document.createElement("div");app.appendChild(charts);
+      renderCharts(charts,model);
 
-      var btns=document.createElement("div"); btns.style.cssText="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;";
-      var b1=document.createElement("button"); b1.className="btn btn-primary"; b1.textContent="Update with new CSV"; b1.onclick=function(){fileInput.click();};
-      var b2=document.createElement("button"); b2.className="btn btn-ghost"; b2.textContent="Clear data"; b2.onclick=function(){ if(confirm("Clear saved history from this device?")){ localStorage.removeItem(STORAGE_KEY); render(false); } };
-      btns.appendChild(b1); btns.appendChild(b2); app.appendChild(btns);
+      var btns=document.createElement("div");btns.className="btnrow";
+      var b1=document.createElement("button");b1.className="btn btn-primary";b1.textContent="Update 360HP CSV";b1.onclick=function(){fileInput.click();};
+      var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){localStorage.removeItem(K_ROWS);localStorage.removeItem(K_OURA);localStorage.removeItem(K_OURATIME);render(false);}};
+      btns.appendChild(b1);btns.appendChild(b2);app.appendChild(btns);
     } else {
-      var p=document.createElement("div"); p.className="panel";
-      p.innerHTML='<div class="ctitle">Get started</div><p class="cnote" style="font-size:14px">Import your 360HP CSV to generate today\'s signal. Your HRV (rMSSD) is the primary driver, scored against your own 7-day rolling baseline. Once imported, your history is saved on this device.</p>';
-      var b=document.createElement("button"); b.className="btn btn-primary"; b.style.padding="12px 20px"; b.style.fontSize="15px"; b.textContent="Import 360HP CSV"; b.onclick=function(){fileInput.click();};
+      var p=document.createElement("div");p.className="panel";
+      p.innerHTML='<div class="ctitle">Get started</div>'+
+        '<p class="cnote" style="font-size:14px">Two sources feed your signal. <span class="tag tag-360">360HP</span> is your HRV anchor — import its CSV. <span class="tag tag-oura">Oura</span> pulls automatically to add readiness, sleep, resting HR and body temperature.</p>';
+      var b=document.createElement("button");b.className="btn btn-primary";b.style.padding="12px 20px";b.style.fontSize="15px";b.textContent="Import 360HP CSV";b.onclick=function(){fileInput.click();};
       p.appendChild(b);
-      var o=document.createElement("div"); o.style.cssText="margin-top:28px;padding-top:22px;border-top:1px solid "+C.line+";";
-      o.innerHTML='<div style="font-size:14px;font-weight:600;margin-bottom:6px">Oura live pull <span style="color:'+C.amber+';font-weight:500">— coming next</span></div>'+
-        '<p class="cnote">Paste your Oura Personal Access Token to save it for when live pull is wired up. Browsers can\'t call the Oura API directly, so this needs a small relay — the next step. Token stays on this device only.</p>'+
-        '<input type="password" placeholder="Oura personal access token">';
-      p.appendChild(o); app.appendChild(p);
+      var b3=document.createElement("button");b3.className="btn btn-ghost";b3.style.marginLeft="10px";b3.style.padding="12px 20px";b3.textContent="Sync Oura now";
+      b3.onclick=function(){ouraStatus={state:"loading",msg:""};render(false);fetchOura(function(res){ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"};render(false);});};
+      p.appendChild(b3);
+      app.appendChild(p);
     }
 
-    var foot=document.createElement("div"); foot.className="foot";
-    foot.textContent="Signal, not diagnosis. This reads trends in your own data to suggest how hard to go — it doesn't replace how you actually feel or medical advice. A red day when you feel great is worth a second look; a green day when you feel ill is not a licence to push.";
+    var foot=document.createElement("div");foot.className="foot";
+    foot.textContent="Signal, not diagnosis. This fuses trends across your own data to suggest how hard to go — it doesn't replace how you actually feel or medical advice. When your two sources disagree, it tells you and leans cautious. A red day when you feel great is worth a second look; a green day when you feel ill is not a licence to push.";
     app.appendChild(foot);
+    window.scrollTo(0,0);
   }
 
-  try{ render(false); }
-  catch(err){ fail("Something went wrong starting the app: "+err.message); }
+  // initial render, then auto-sync Oura once on load if we have a URL
+  try{
+    render(false);
+    if(WORKER_URL && WORKER_URL.indexOf("http")===0){
+      ouraStatus={state:"loading",msg:""};
+      // reflect loading state without full re-render flash: only if today exists
+      fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); });
+    }
+  }catch(err){ fail("Something went wrong starting the app: "+err.message); }
 })();
 </script>
 </body>
