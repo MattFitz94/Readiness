@@ -107,6 +107,15 @@
   .chip{display:inline-block;width:12px;height:12px;border-radius:3px;margin-left:3px;}
   .insight{background:#0A2028;border:1px solid #123845;border-radius:12px;padding:14px 16px;margin-bottom:12px;font-size:13.5px;line-height:1.55;}
   .insight b{color:#DCEEF0;}
+  .histrow{display:flex;align-items:center;gap:14px;background:#0A2028;border:1px solid #123845;border-radius:12px;padding:12px 14px;margin-bottom:8px;cursor:pointer;}
+  .histrow:active{background:#0E2A34;}
+  .histscore{font-family:'Fraunces',serif;font-size:26px;font-weight:600;font-variant-numeric:tabular-nums;min-width:44px;text-align:center;}
+  .histmid{flex:1;min-width:0;}
+  .histdate{font-size:14px;font-weight:700;color:#DCEEF0;}
+  .histword{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;}
+  .histmeta{font-size:11.5px;color:#6E9AA0;margin-top:2px;font-variant-numeric:tabular-nums;}
+  .histexp{background:#0A2028;border:1px solid #123845;border-top:none;border-radius:0 0 12px 12px;margin:-8px 0 8px;padding:12px 14px;}
+  .histexp .rline{border-bottom-color:#0E2A34;}
 </style>
 </head>
 <body>
@@ -124,8 +133,10 @@
 
   // ==== YOUR RELAY ADDRESS ====
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
+  var GYM_URL="https://script.google.com/macros/s/AKfycbzhsjCB7yMHBv5nWXcL1cYbvlmBip2sNbl7Xrc2dhnJXLSnOrgxYjoWzwUrFdVcab21/exec";
 
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
+  var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
 
   function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
   function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
@@ -315,6 +326,31 @@
       set(K_OURATIME,String(Date.now()));
       cb({ok:true});
     }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out reaching Oura":e.message}); });
+  }
+
+  // ---------- gym (Google Sheets via Apps Script) ----------
+  function fetchGym(cb){
+    if(!GYM_URL || GYM_URL.indexOf("http")!==0){ cb({error:"No gym URL set"}); return; }
+    var ctrl=new AbortController(); var to=setTimeout(function(){ctrl.abort();},15000);
+    fetch(GYM_URL,{signal:ctrl.signal}).then(function(r){return r.json();}).then(function(d){
+      clearTimeout(to);
+      if(!d.ok){ cb({error:d.error||"Sheet returned an error"}); return; }
+      setJSON(K_GYM,{weeks:d.weeks||[],updated:d.updated||""});
+      set(K_GYMTIME,String(Date.now()));
+      cb({ok:true});
+    }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out reaching the sheet":e.message}); });
+  }
+  // POST logged sets. rows: [{week,day,date,exercise,v1,v2,v3,v4,done}]
+  function postGym(rows,cb){
+    if(!GYM_URL){ cb({error:"No gym URL set"}); return; }
+    var ctrl=new AbortController(); var to=setTimeout(function(){ctrl.abort();},15000);
+    // Apps Script web apps accept simple POST; text/plain avoids a CORS preflight
+    fetch(GYM_URL,{method:"POST",body:JSON.stringify({rows:rows}),headers:{"Content-Type":"text/plain;charset=utf-8"},signal:ctrl.signal})
+      .then(function(r){return r.json();}).then(function(d){
+        clearTimeout(to);
+        if(!d.ok){ cb({error:d.error||"Save failed"}); return; }
+        cb({ok:true,saved:d.saved});
+      }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out saving":e.message}); });
   }
 
   // ---------- chart helpers ----------
@@ -513,11 +549,176 @@
     }
   }
 
+  // ---------- History tab (past days + scores) ----------
+  var histOpen=null; // iso of expanded day
+  function buildHistory(container,model){
+    var rowsB=model.filter(function(d){return d.has;});
+    if(rowsB.length<1){needSync(container,"No history yet. Import your 360HP CSV (and sync Oura) and your daily scores will build up here.");return;}
+
+    var intro=document.createElement("div");intro.className="cnote";intro.style.margin="0 0 12px";
+    intro.textContent="Every day you have data for, newest first. Tap a day to see the full breakdown of why it scored what it did.";
+    container.appendChild(intro);
+
+    // newest first
+    var list=rowsB.slice().reverse();
+    list.forEach(function(d){
+      var bc=C[d.band];
+      var row=document.createElement("div");row.className="histrow";row.style.borderColor=bc+"44";
+      var dateStr=new Date(d.iso).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"});
+      var meta=[];
+      if(d.hrv!=null) meta.push("HRV "+d.hrv.toFixed(0)+(d.hrvSrc?" ("+d.hrvSrc+")":""));
+      if(d.hp_subjective!=null) meta.push("subj "+d.hp_subjective);
+      if(d.o_readiness!=null) meta.push("Oura "+d.o_readiness);
+      row.innerHTML='<div class="histscore" style="color:'+bc+'">'+d.score100+'</div>'+
+        '<div class="histmid"><div class="histdate">'+dateStr+'</div>'+
+        '<div class="histword" style="color:'+bc+'">'+VERD[d.band].w+' \u00b7 '+VERD[d.band].h+'</div>'+
+        '<div class="histmeta">'+meta.join("  \u00b7  ")+'</div></div>'+
+        '<div style="color:'+C.muted+';font-size:20px">'+(histOpen===d.iso?"\u2013":"+")+'</div>';
+      row.onclick=function(){ histOpen=(histOpen===d.iso?null:d.iso); render(false); };
+      container.appendChild(row);
+
+      if(histOpen===d.iso){
+        var exp=document.createElement("div");exp.className="histexp";
+        if(d.reasons&&d.reasons.length){
+          d.reasons.forEach(function(r){
+            var cls=r.dir==="up"?"rup":r.dir==="down"?"rdown":r.dir==="warn"?"rwarn":"rflat";
+            var ico=r.dir==="up"?"\u25b2":r.dir==="down"?"\u25bc":r.dir==="warn"?"\u26a0":"\u2022";
+            var line=document.createElement("div");line.className="rline";
+            line.innerHTML='<span class="rico '+cls+'">'+ico+'</span><span>'+r.txt+'</span>';
+            exp.appendChild(line);
+          });
+        } else { var e=document.createElement("div");e.className="rline";e.textContent="No detailed breakdown for this day.";exp.appendChild(e); }
+        // extra numbers row
+        var extra=document.createElement("div");extra.className="histmeta";extra.style.marginTop="8px";
+        var bits=[];
+        if(d.rhr!=null) bits.push("Resting HR "+d.rhr);
+        if(d.o_sleepscore!=null) bits.push("Oura sleep "+d.o_sleepscore);
+        if(d.o_tempdev!=null) bits.push("Temp \u0394 "+(d.o_tempdev>0?"+":"")+d.o_tempdev.toFixed(2)+"\u00b0C");
+        if(d.confidence) bits.push("confidence: "+d.confidence);
+        extra.textContent=bits.join("  \u00b7  ");
+        exp.appendChild(extra);
+        container.appendChild(exp);
+      }
+    });
+
+    // quick stats footer
+    var scores=rowsB.map(function(d){return d.score100;});
+    var g=rowsB.filter(function(d){return d.band==="green";}).length;
+    var y=rowsB.filter(function(d){return d.band==="yellow";}).length;
+    var rr=rowsB.filter(function(d){return d.band==="red";}).length;
+    var sum=document.createElement("div");sum.className="insight";sum.style.marginTop="6px";
+    sum.innerHTML="<b>"+rowsB.length+" days tracked.</b> Average score "+Math.round(mean(scores))+"/100 \u00b7 "+
+      "<span style='color:"+C.green+"'>"+g+" green</span>, <span style='color:"+C.amber+"'>"+y+" amber</span>, <span style='color:"+C.red+"'>"+rr+" red</span>.";
+    container.appendChild(sum);
+  }
+
+  // ---------- Training tab (gym sheet) ----------
+  var gymStatus={state:"idle",msg:""};
+  function buildTraining(container,model){
+    var gym=getJSON(K_GYM,null);
+    var today=model.length?model[model.length-1]:null;
+
+    // status + sync
+    var bar=document.createElement("div");bar.className="sync";
+    var gt=get(K_GYMTIME);var gwhen=gt?new Date(parseInt(gt,10)):null;
+    var gdot=gymStatus.state==="err"?"doterr":(gym?"dotlive":"dotoff");
+    var gmsg=gymStatus.state==="loading"?"Loading your programme\u2026":gymStatus.state==="err"?("Sheet issue: "+gymStatus.msg):gym?("Programme loaded"+(gwhen?" \u00b7 "+gwhen.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"")):"Not loaded yet";
+    bar.innerHTML='<span class="'+gdot+'"></span><span>'+gmsg+'</span>';
+    var rb=document.createElement("button");rb.className="btn btn-ghost";rb.style.marginLeft="auto";rb.style.padding="6px 12px";rb.textContent="Sync programme";
+    rb.onclick=function(){gymStatus={state:"loading",msg:""};render(false);fetchGym(function(res){gymStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"};render(false);});};
+    bar.appendChild(rb);container.appendChild(bar);
+
+    if(!gym){
+      needSync(container,"Tap \u201cSync programme\u201d to pull your training plan from your Google Sheet. It loads your weeks and days so you can browse and log sessions here.");
+      // combined readiness line even without gym
+      if(today&&today.has){var ins=document.createElement("div");ins.className="insight";
+        ins.innerHTML="<b>Today's readiness: "+today.score100+"/100 ("+VERD[today.band].h+").</b> Sync your programme to see it beside today's session.";
+        container.appendChild(ins);}
+      return;
+    }
+
+    var weeks=gym.weeks||[];
+    if(!weeks.length){needSync(container,"Your sheet loaded but no programme weeks were found. Check the sheet has the usual Date/Day layout.");return;}
+
+    // combined readiness banner
+    if(today&&today.has){
+      var bc=C[today.band];
+      var rd=document.createElement("div");rd.className="insight";rd.style.borderColor=bc+"55";
+      rd.innerHTML="<b style='color:"+bc+"'>Readiness "+today.score100+"/100 \u2014 "+VERD[today.band].h+".</b> "+VERD[today.band].b+" You decide how to apply it to today's session below.";
+      container.appendChild(rd);
+    }
+
+    // week/day selectors (persist selection)
+    var sel=getJSON(K_GYMSEL,{w:0,d:0});
+    if(sel.w>=weeks.length) sel.w=0;
+    var wk=weeks[sel.w]; var days=wk.days||[];
+    if(sel.d>=days.length) sel.d=0;
+
+    var selCard=document.createElement("div");selCard.className="card";
+    selCard.innerHTML='<div class="ctitle">Browse programme</div>';
+    // week dropdown
+    var wsel=document.createElement("select");wsel.style.cssText="width:100%;padding:11px 12px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;margin:8px 0;";
+    weeks.forEach(function(w,i){var o=document.createElement("option");o.value=i;o.textContent=w.name;if(i===sel.w)o.selected=true;wsel.appendChild(o);});
+    wsel.onchange=function(){sel.w=parseInt(wsel.value,10);sel.d=0;setJSON(K_GYMSEL,sel);render(false);};
+    selCard.appendChild(wsel);
+    // day dropdown
+    var dsel=document.createElement("select");dsel.style.cssText=wsel.style.cssText;
+    days.forEach(function(dd,i){var o=document.createElement("option");o.value=i;o.textContent=(dd.label||("Day "+(i+1)))+(dd.date?"  ("+dd.date+")":"");if(i===sel.d)o.selected=true;dsel.appendChild(o);});
+    dsel.onchange=function(){sel.d=parseInt(dsel.value,10);setJSON(K_GYMSEL,sel);render(false);};
+    selCard.appendChild(dsel);
+    container.appendChild(selCard);
+
+    // the chosen day's exercises, each loggable
+    var day=days[sel.d];
+    if(!day){needSync(container,"No day selected.");return;}
+    var logInputs=[]; // {exercise, inputs:[4], doneEl}
+    (day.exercises||[]).forEach(function(ex){
+      var c=document.createElement("div");c.className="card";
+      var meta=[];
+      if(ex.sets) meta.push(ex.sets+" sets"); if(ex.reps) meta.push(ex.reps+" reps");
+      c.innerHTML='<div style="font-weight:700;font-size:15px;color:'+C.ink+'">'+ex.name+'</div>'+
+        (meta.length?'<div class="cnote" style="margin:3px 0 6px">'+meta.join(" \u00b7 ")+'</div>':'')+
+        (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'')+
+        (ex.last?'<div class="ssrc" style="color:'+C.muted+';margin-bottom:8px">Last time: '+ex.last+'</div>':'');
+      // 4 set inputs prefilled with existing vals
+      var grid=document.createElement("div");grid.style.cssText="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;";
+      var inputs=[];
+      for(var s=0;s<4;s++){
+        var inp=document.createElement("input");inp.type="text";inp.inputMode="numeric";inp.placeholder="S"+(s+1);
+        inp.value=(ex.vals&&ex.vals[s])?ex.vals[s]:"";
+        inp.style.cssText="padding:9px 6px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;text-align:center;";
+        grid.appendChild(inp);inputs.push(inp);
+      }
+      c.appendChild(grid);
+      logInputs.push({exercise:ex.name,inputs:inputs});
+      container.appendChild(c);
+    });
+
+    // save button -> POST to sheet
+    var saveWrap=document.createElement("div");saveWrap.className="btnrow";
+    var saveBtn=document.createElement("button");saveBtn.className="btn btn-primary";
+    saveBtn.textContent=gymStatus.state==="saving"?"Saving\u2026":"Log this session";
+    saveBtn.onclick=function(){
+      var rows=logInputs.map(function(li){
+        return {week:wk.name,day:day.label,date:day.date,exercise:li.exercise,
+          v1:li.inputs[0].value,v2:li.inputs[1].value,v3:li.inputs[2].value,v4:li.inputs[3].value,done:true};
+      }).filter(function(r){return r.v1||r.v2||r.v3||r.v4;});
+      if(!rows.length){alert("Enter at least one set value before logging.");return;}
+      gymStatus={state:"saving",msg:""};render(false);
+      postGym(rows,function(res){
+        if(res.ok){gymStatus={state:"ok",msg:""};alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");}
+        else{gymStatus={state:"err",msg:res.error};alert("Couldn't save: "+res.error);}
+        render(false);
+      });
+    };
+    saveWrap.appendChild(saveBtn);container.appendChild(saveWrap);
+  }
+
   // ---------- app render ----------
   var app=document.getElementById("app");
   var ouraStatus={state:"idle",msg:""};
   var TAB="today";
-  var TABS=[["today","Today"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
+  var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
 
   function render(savedFlash){
     var arr=fuse();
@@ -621,6 +822,8 @@
     }
     else if(TAB==="trends") buildTrends(body,model);
     else if(TAB==="compare") buildCompare(body,model);
+    else if(TAB==="history") buildHistory(body,model);
+    else if(TAB==="training") buildTraining(body,model);
     else if(TAB==="oura") buildOura(body,model);
     else if(TAB==="insights") buildInsights(body,model);
 
