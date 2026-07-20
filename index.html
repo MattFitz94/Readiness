@@ -116,6 +116,9 @@
   .histmeta{font-size:11.5px;color:#6E9AA0;margin-top:2px;font-variant-numeric:tabular-nums;}
   .histexp{background:#0A2028;border:1px solid #123845;border-top:none;border-radius:0 0 12px 12px;margin:-8px 0 8px;padding:12px 14px;}
   .histexp .rline{border-bottom-color:#0E2A34;}
+  .chkbox{width:24px;height:24px;border-radius:7px;border:2px solid #3DE0C8;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .15s;}
+  .chkbox.on{background:#2FE6B0;border-color:#2FE6B0;}
+  .chkbox.on::after{content:"\2713";color:#04141A;font-weight:800;font-size:15px;}
 </style>
 </head>
 <body>
@@ -690,7 +693,19 @@
         grid.appendChild(inp);inputs.push(inp);
       }
       c.appendChild(grid);
-      logInputs.push({exercise:ex.name,inputs:inputs});
+
+      // Done checkbox
+      var doneWrap=document.createElement("div");doneWrap.style.cssText="display:flex;align-items:center;gap:10px;margin-top:12px;cursor:pointer;";
+      var box=document.createElement("div");box.className="chkbox";
+      var doneState={on:false};
+      var lbl=document.createElement("span");lbl.style.cssText="font-size:14px;font-weight:600;color:"+C.muted+";";lbl.textContent="Mark completed";
+      function paint(){ box.className="chkbox"+(doneState.on?" on":""); lbl.textContent=doneState.on?"Completed":"Mark completed"; lbl.style.color=doneState.on?C.green:C.muted; }
+      doneWrap.onclick=function(){ doneState.on=!doneState.on; paint(); };
+      paint();
+      doneWrap.appendChild(box);doneWrap.appendChild(lbl);
+      c.appendChild(doneWrap);
+
+      logInputs.push({exercise:ex.name,inputs:inputs,done:doneState});
       container.appendChild(c);
     });
 
@@ -701,9 +716,9 @@
     saveBtn.onclick=function(){
       var rows=logInputs.map(function(li){
         return {week:wk.name,day:day.label,date:day.date,exercise:li.exercise,
-          v1:li.inputs[0].value,v2:li.inputs[1].value,v3:li.inputs[2].value,v4:li.inputs[3].value,done:true};
-      }).filter(function(r){return r.v1||r.v2||r.v3||r.v4;});
-      if(!rows.length){alert("Enter at least one set value before logging.");return;}
+          v1:li.inputs[0].value,v2:li.inputs[1].value,v3:li.inputs[2].value,v4:li.inputs[3].value,done:li.done.on};
+      }).filter(function(r){return r.v1||r.v2||r.v3||r.v4||r.done;});
+      if(!rows.length){alert("Enter set values or tick an exercise as completed before logging.");return;}
       gymStatus={state:"saving",msg:""};render(false);
       postGym(rows,function(res){
         if(res.ok){gymStatus={state:"ok",msg:""};alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");}
