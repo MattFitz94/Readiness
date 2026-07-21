@@ -140,6 +140,7 @@
 
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
   var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
+  var K_TOURN="readiness_tournament_v1", K_LOGHIST="readiness_loghist_v1", K_TRAVEL="readiness_travel_v1";
 
   function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
   function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
@@ -550,9 +551,49 @@
         wc.appendChild(tr);}
       container.appendChild(wc);
     }
-  }
 
-  // ---------- History tab (past days + scores) ----------
+    // ---- Training load vs recovery (from locally-logged sessions) ----
+    var loghist=getJSON(K_LOGHIST,[]);
+    if(loghist.length>=2 && chartsReady()){
+      // aggregate weekly training volume by ISO date -> sum of top weights that day
+      var byDate={};
+      loghist.forEach(function(l){ if(!l.date) return; byDate[l.date]=(byDate[l.date]||0)+(l.topWeight||0); });
+      var dates=Object.keys(byDate).sort();
+      if(dates.length>=2){
+        // align HRV roll7 to those dates from model
+        var hrvByDate={}; model.forEach(function(d){ if(d.roll7!=null) hrvByDate[d.iso]=r1(d.roll7); });
+        var cd=card("Training load vs recovery","Bars = training load that day (sum of top set weights). Line = your 7-day HRV trend. When load climbs while the line falls, you're outrunning recovery.");
+        var cv=mkCanvas(cd,230);container.appendChild(cd);
+        var lbl=dates.map(function(x){return fmt(new Date(x));});
+        CHARTS.push(new Chart(cv,{type:"bar",data:{labels:lbl,datasets:[
+          {type:"bar",label:"load (kg)",data:dates.map(function(x){return Math.round(byDate[x]);}),backgroundColor:C.amber+"88",borderRadius:3,yAxisID:"y"},
+          {type:"line",label:"HRV 7-day",data:dates.map(function(x){return hrvByDate[x]!=null?hrvByDate[x]:null;}),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3,spanGaps:true,yAxisID:"y1"}
+        ]},options:baseOpts(deepMerge({scales:{y:{position:"left",title:{display:true,text:"load",color:C.muted}},y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"HRV",color:C.muted}}}},LEG))}));
+      }
+    } else if(chartsReady()){
+      needSync(container,"Training load vs recovery will chart here once you've logged a few gym sessions in the Training tab. It overlays your training volume against your HRV trend to spot when load is outrunning recovery.");
+    }
+
+    // ---- VBT: bar velocity trend at load ----
+    var velLogs=loghist.filter(function(l){return l.avgVel!=null&&l.topWeight!=null;});
+    if(velLogs.length>=2 && chartsReady()){
+      // group by exercise, show the most-logged one
+      var byEx={}; velLogs.forEach(function(l){ (byEx[l.exercise]=byEx[l.exercise]||[]).push(l); });
+      var topEx=Object.keys(byEx).sort(function(a,b){return byEx[b].length-byEx[a].length;})[0];
+      var series=byEx[topEx].slice().sort(function(a,b){return (a.date<b.date?-1:1);});
+      if(series.length>=2){
+        var cd2=card("Bar speed trend \u2014 "+topEx,"Average bar velocity (m/s) over time for your most-logged lift. A drop in speed at similar loads is an early fatigue signal, often before HRV moves.");
+        var cv2=mkCanvas(cd2,220);container.appendChild(cd2);
+        var lbl2=series.map(function(l){return fmt(new Date(l.date));});
+        CHARTS.push(new Chart(cv2,{type:"line",data:{labels:lbl2,datasets:[
+          {label:"avg velocity",data:series.map(function(l){return r1(l.avgVel);}),borderColor:C.glow,borderWidth:2.6,pointRadius:3,tension:0.3},
+          {label:"top weight",data:series.map(function(l){return l.topWeight;}),borderColor:C.muted,borderWidth:1,borderDash:[4,3],pointRadius:0,tension:0.3,yAxisID:"y1"}
+        ]},options:baseOpts(deepMerge({scales:{y:{position:"left",title:{display:true,text:"m/s",color:C.muted}},y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"kg",color:C.muted}}}},LEG))}));
+      }
+    } else if(chartsReady()){
+      needSync(container,"Bar-speed trends appear here once you've logged velocity for a lift a few times. Tracking bar speed at a given load is elite-level fatigue monitoring \u2014 a speed drop flags fatigue early.");
+    }
+  }
   var histOpen=null; // iso of expanded day
   function buildHistory(container,model){
     var rowsB=model.filter(function(d){return d.has;});
@@ -730,7 +771,25 @@
       if(!rows.length){alert("Enter set values or tick an exercise as completed before logging.");return;}
       gymStatus={state:"saving",msg:""};render(false);
       postGym(rows,function(res){
-        if(res.ok){gymStatus={state:"ok",msg:""};alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");}
+        if(res.ok){
+          gymStatus={state:"ok",msg:""};
+          // cache logged session locally so load & velocity trends can be charted
+          var hist=getJSON(K_LOGHIST,[]);
+          var logDate=day.date||new Date().toISOString().slice(0,10);
+          rows.forEach(function(r){
+            // volume = sum of (weight values entered); a simple load proxy per exercise
+            var weights=[r.v1,r.v2,r.v3,r.v4].map(function(x){return parseFloat(x)||0;});
+            var vols=weights.filter(function(x){return x>0;});
+            var vel=[r.vel1,r.vel2,r.vel3,r.vel4].map(function(x){return parseFloat(x)||0;}).filter(function(x){return x>0;});
+            hist.push({date:logDate,week:r.week,day:r.day,exercise:r.exercise,
+              weights:weights, avgVel: vel.length?(vel.reduce(function(a,b){return a+b;},0)/vel.length):null,
+              topWeight: vols.length?Math.max.apply(null,vols):null, ts:Date.now()});
+          });
+          // keep it from growing unbounded — last ~400 exercise-logs
+          if(hist.length>400) hist=hist.slice(hist.length-400);
+          setJSON(K_LOGHIST,hist);
+          alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");
+        }
         else{gymStatus={state:"err",msg:res.error};alert("Couldn't save: "+res.error);}
         render(false);
       });
@@ -818,13 +877,41 @@
       var v=document.createElement("div");v.className="verdict";
       v.style.background=bs;v.style.border="1px solid "+bc+"55";v.style.boxShadow="0 0 40px -12px "+bc+"66";
       var confColor = today.confidence.indexOf("high")>=0?C.green:today.confidence.indexOf("mixed")>=0?C.amber:C.muted;
+      // trend basis line — makes clear the score is relative to your rolling baseline, not one day
+      var trendBits=[];
+      if(today.hDev!=null){ var pct=Math.round(today.hDev*100);
+        trendBits.push("HRV "+(pct>=0?"+":"")+pct+"% vs your 7-day baseline"); }
+      if(today.roll7!=null&&today.roll30!=null){
+        var dir=today.roll7>=today.roll30; trendBits.push("<span style='color:"+(dir?C.green:C.amber)+"'>"+(dir?"\u25b2 trend climbing":"\u25bc trend sliding")+"</span>"); }
+      var trendLine=trendBits.length?'<div style="font-size:12.5px;color:'+C.muted+';margin-top:10px;font-weight:600">'+trendBits.join("  \u00b7  ")+'</div>':'';
+      // tournament mode reshapes the guidance toward freshness
+      var tournOn=get(K_TOURN)==="1";
+      var travelOn=get(K_TRAVEL)==="1";
+      var bodyText=VERD[today.band].b;
+      if(tournOn){
+        if(today.band==="green") bodyText="Tournament week: you're fresh. Keep it that way \u2014 sharpen, don't grind. Save the tank for the course.";
+        else if(today.band==="yellow") bodyText="Tournament week: middling readiness. Light and sharp only \u2014 prioritise being fresh over getting work in.";
+        else bodyText="Tournament week and signals are down. Rest and recover hard \u2014 arriving fresh matters more than any session right now.";
+      }
       v.innerHTML='<div class="vtop">'+
         '<div class="bigscore" style="color:'+bc+';text-shadow:0 0 30px '+bc+'66">'+today.score100+'<span class="scoreout">/100</span></div>'+
-        '<div class="scoreside"><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+VERD[today.band].h+'</div></div>'+
+        '<div class="scoreside"><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+(tournOn?"\ud83c\udfcc\ufe0f "+VERD[today.band].h:VERD[today.band].h)+'</div></div>'+
         '</div>'+
-        '<p class="vbody">'+VERD[today.band].b+'</p>'+
+        trendLine+
+        (travelOn?'<div style="font-size:12px;color:'+C.amber+';margin-top:8px;font-weight:600">\u2708\ufe0f Travel flagged \u2014 a dip today is likely jet lag, not a red flag; don\'t over-read it.</div>':'')+
+        '<p class="vbody">'+bodyText+'</p>'+
         '<span class="conf" style="background:'+confColor+'22;color:'+confColor+'">Confidence: '+today.confidence+'</span>';
       body.appendChild(v);
+
+      // Tournament + travel toggles
+      var tog=document.createElement("div");tog.className="btnrow";
+      var tb=document.createElement("button");tb.className="btn "+(tournOn?"btn-primary":"btn-ghost");
+      tb.textContent=(tournOn?"\ud83c\udfcc\ufe0f Tournament mode: ON":"Tournament mode");
+      tb.onclick=function(){ set(K_TOURN,tournOn?"0":"1"); render(false); };
+      var vb=document.createElement("button");vb.className="btn "+(travelOn?"btn-primary":"btn-ghost");
+      vb.textContent=(travelOn?"\u2708\ufe0f Travel day: ON":"Travel day");
+      vb.onclick=function(){ set(K_TRAVEL,travelOn?"0":"1"); render(false); };
+      tog.appendChild(tb);tog.appendChild(vb);body.appendChild(tog);
 
       var rc=document.createElement("div");rc.className="reason";rc.innerHTML='<h3>Why this signal</h3>';
       if(today.reasons.length){ today.reasons.forEach(function(r){
