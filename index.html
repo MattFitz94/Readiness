@@ -802,9 +802,11 @@
   var ouraStatus={state:"idle",msg:""};
   var TAB="today";
   var TABSCROLL=0;
+  var PREVTAB=null;
   var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
 
   function render(savedFlash){
+    var keepScroll=(typeof window!=="undefined"&&window.pageYOffset)?window.pageYOffset:0;
     var arr=fuse();
     var model=arr.length?analyze(arr):[];
     var today=model.length?model[model.length-1]:null;
@@ -947,7 +949,13 @@
     var foot=document.createElement("div");foot.className="foot";
     foot.textContent="Signal, not diagnosis. This fuses trends across your own data to suggest how hard to go \u2014 it doesn't replace how you actually feel or medical advice. When your two sources disagree, it tells you and leans cautious.";
     app.appendChild(foot);
-    if(TAB!=="today") window.scrollTo(0,0);
+    // Scroll behaviour: jump to top only when the tab actually changes.
+    // For in-tab re-renders (expanding a history day, dropdowns, toggles) keep position.
+    if(typeof window!=="undefined"&&window.scrollTo){
+      if(PREVTAB!==TAB){ window.scrollTo(0,0); }
+      else { window.scrollTo(0,keepScroll); }
+    }
+    PREVTAB=TAB;
   }
 
   // initial render, then auto-sync Oura once on load if we have a URL
