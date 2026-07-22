@@ -160,6 +160,7 @@
   function pearson(xs,ys){var n=xs.length;if(n<4)return null;var mx=mean(xs),my=mean(ys),nu=0,dx=0,dy=0;
     for(var i=0;i<n;i++){var a=xs[i]-mx,b=ys[i]-my;nu+=a*b;dx+=a*a;dy+=b*b;}if(!dx||!dy)return null;return nu/Math.sqrt(dx*dy);}
   function r1(v){return v==null?null:Math.round(v*10)/10;}
+  function r2(v){return v==null?null:Math.round(v*100)/100;}
   // least-squares best fit; returns {m,b} for y = m*x + b, or null
   function linreg(xs,ys){var n=xs.length;if(n<2)return null;var mx=mean(xs),my=mean(ys),num=0,den=0;
     for(var i=0;i<n;i++){var dx=xs[i]-mx;num+=dx*(ys[i]-my);den+=dx*dx;}if(!den)return null;
@@ -181,6 +182,10 @@
         days[iso].hp_rhr=r.RHR?parseFloat(r.RHR):null;
         days[iso].hp_subjective=r.subjective?parseFloat(r.subjective):null;
         days[iso].hp_sleep=r.sleep?parseFloat(r.sleep):null;
+        days[iso].hp_energy=r.energy?parseFloat(r.energy):null;
+        days[iso].hp_diet=r.diet?parseFloat(r.diet):null;
+        days[iso].hp_exercise=r.exercise?parseFloat(r.exercise):null;
+        days[iso].hp_happiness=r.happiness?parseFloat(r.happiness):null;
         days[iso].tags=(r.tags||"").trim(); days[iso].note=(r.note||"").trim();
       });
     }
@@ -345,7 +350,7 @@
     fetch(GYM_URL,{signal:ctrl.signal}).then(function(r){return r.json();}).then(function(d){
       clearTimeout(to);
       if(!d.ok){ cb({error:d.error||"Sheet returned an error"}); return; }
-      setJSON(K_GYM,{weeks:d.weeks||[],updated:d.updated||""});
+      setJSON(K_GYM,{weeks:d.weeks||[],history:d.history||[],updated:d.updated||""});
       set(K_GYMTIME,String(Date.now()));
       cb({ok:true});
     }).catch(function(e){ clearTimeout(to);
@@ -395,25 +400,38 @@
     var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
     if(rowsB.length<2){needSync(container,"Import your 360HP CSV (and sync Oura) to see trends here.");return;}
 
-    // HRV as bars with the rolling baseline line over them
-    (function(){var cd=card("HRV vs your rolling baseline","Bars are daily HRV; the line is your 7-day rolling baseline. Bars under the line = a dip below your normal.");
+    // ---- 360HP-ONLY series (these Trends charts ignore Oura; gaps where no 360HP) ----
+    var hpHRV=rowsB.map(function(d){return d.hp_hrv!=null?d.hp_hrv:null;});
+    var hpRHR=rowsB.map(function(d){return d.hp_rhr!=null?d.hp_rhr:null;});
+    // rolling helpers over a null-tolerant array
+    function rollMed(arr,i,w){var v=[];for(var k=Math.max(0,i-w+1);k<=i;k++){if(arr[k]!=null)v.push(arr[k]);}return v.length>=3?median(v):null;}
+    function rollMean(arr,i,w){var v=[];for(var k=Math.max(0,i-w+1);k<=i;k++){if(arr[k]!=null)v.push(arr[k]);}return v.length>=3?mean(v):null;}
+    function rollSD(arr,i,w){var v=[];for(var k=Math.max(0,i-w+1);k<=i;k++){if(arr[k]!=null)v.push(arr[k]);}return v.length>=3?stdev(v):null;}
+    var hpBase=hpHRV.map(function(_,i){return rollMed(hpHRV,i,7);});
+    var hpBaseR1=hpBase.map(r1);
+    var hp7=hpHRV.map(function(_,i){return rollMean(hpHRV,i,7);});
+    var hp30=hpHRV.map(function(_,i){return rollMean(hpHRV,i,30);});
+    var hpSD=hpHRV.map(function(_,i){return rollSD(hpHRV,i,7);});
+
+    // HRV (360HP) as bars with the rolling baseline line over them
+    (function(){var cd=card("HRV vs your rolling baseline","360HP HRV only. Bars are daily HRV; the line is your 7-day rolling baseline. Gaps = days with no 360HP reading.");
       var cv=mkCanvas(cd,240);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
-        {type:"bar",label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),backgroundColor:C.hrv+"66",borderColor:C.hrv,borderWidth:1,borderRadius:3,order:2},
-        {type:"line",label:"baseline",data:rowsB.map(function(d){return r1(d.hBase);}),borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+        {type:"bar",label:"HRV (360HP)",data:hpHRV.map(r1),backgroundColor:C.hrv+"66",borderColor:C.hrv,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"baseline",data:hpBaseR1,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
       ]},options:baseOpts(deepMerge({},LEG))}));})();
 
-    var up=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase+d.hSd):null;});
-    var lo=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase-d.hSd):null;});
-    lineChart(container,"HRV trend with variability band","Shaded band is your normal swing (\u00b11 SD). Breaking below it = a real dip, not noise.",labels,[
-      {label:"upper",data:up,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:"+1"},
-      {label:"lower",data:lo,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:false},
-      {label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3}
+    var up=hpHRV.map(function(_,i){return (hpBase[i]!=null&&hpSD[i]!=null)?r1(hpBase[i]+hpSD[i]):null;});
+    var lo=hpHRV.map(function(_,i){return (hpBase[i]!=null&&hpSD[i]!=null)?r1(hpBase[i]-hpSD[i]):null;});
+    lineChart(container,"HRV trend with variability band","360HP HRV only. Shaded band is your normal swing (\u00b11 SD). Breaking below it = a real dip, not noise.",labels,[
+      {label:"upper",data:up,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:"+1",spanGaps:true},
+      {label:"lower",data:lo,borderColor:"transparent",backgroundColor:C.hrvBand,pointRadius:0,fill:false,spanGaps:true},
+      {label:"HRV (360HP)",data:hpHRV.map(r1),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3,spanGaps:true}
     ],{},240);
 
-    lineChart(container,"Rolling 7-day vs 30-day HRV","When the fast line dips below the slow line, fatigue is building before you feel it.",labels,[
-      {label:"7-day",data:rowsB.map(function(d){return r1(d.roll7);}),borderColor:C.r7,borderWidth:2.4,pointRadius:0,tension:0.35},
-      {label:"30-day",data:rowsB.map(function(d){return r1(d.roll30);}),borderColor:C.r30,borderWidth:2.4,pointRadius:0,tension:0.35}
+    lineChart(container,"Rolling 7-day vs 30-day HRV","360HP HRV only. When the fast line dips below the slow line, fatigue is building before you feel it.",labels,[
+      {label:"7-day",data:hp7.map(r1),borderColor:C.r7,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true},
+      {label:"30-day",data:hp30.map(r1),borderColor:C.r30,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true}
     ],LEG);
 
     // daily score bars
@@ -423,23 +441,18 @@
         {label:"score",data:rowsB.map(function(d){return d.score100;}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
       ]},options:baseOpts({scales:{y:{min:0,max:100}}})}));})();
 
-    // resting HR — bars with a dotted rolling-average line and a ±1SD variability band
-    var hasRhr=rowsB.filter(function(d){return d.rhr!=null;}).length>=2;
+    // resting HR (360HP only) — bars with dotted rolling avg + ±1SD band, gaps where none
+    var hasRhr=hpRHR.filter(function(v){return v!=null;}).length>=2;
     if(hasRhr){
-      var rhrVals=rowsB.map(function(d){return d.rhr!=null?d.rhr:null;});
-      // 7-day rolling average + SD band from available values
-      var rAvg=[],rUp=[],rLo=[];
-      for(var ri=0;ri<rhrVals.length;ri++){
-        var w=[];for(var rk=Math.max(0,ri-6);rk<=ri;rk++){if(rhrVals[rk]!=null)w.push(rhrVals[rk]);}
-        if(w.length){var m=mean(w),sd=w.length>1?stdev(w):0;rAvg.push(r1(m));rUp.push(r1(m+sd));rLo.push(r1(m-sd));}
-        else{rAvg.push(null);rUp.push(null);rLo.push(null);}
-      }
-      var cdR=card("Resting heart rate","Bars are daily resting HR. Dotted line is your 7-day average; the shaded band is your normal swing (\u00b11 SD). A jump above the band can signal fatigue or illness.");
+      var rAvg=hpRHR.map(function(_,i){return r1(rollMean(hpRHR,i,7));});
+      var rUp=hpRHR.map(function(_,i){var m=rollMean(hpRHR,i,7),sd=rollSD(hpRHR,i,7);return (m!=null&&sd!=null)?r1(m+sd):null;});
+      var rLo=hpRHR.map(function(_,i){var m=rollMean(hpRHR,i,7),sd=rollSD(hpRHR,i,7);return (m!=null&&sd!=null)?r1(m-sd):null;});
+      var cdR=card("Resting heart rate","360HP resting HR only. Bars are daily; dotted line is your 7-day average; shaded band is \u00b11 SD. A jump above the band can signal fatigue or illness.");
       var cvR=mkCanvas(cdR,230);container.appendChild(cdR);
       CHARTS.push(new Chart(cvR,{data:{labels:labels,datasets:[
-        {type:"line",label:"upper",data:rUp,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:"+1",order:3},
-        {type:"line",label:"lower",data:rLo,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:false,order:3},
-        {type:"bar",label:"resting HR",data:rhrVals,backgroundColor:C.red+"55",borderColor:C.red,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"upper",data:rUp,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:"+1",order:3,spanGaps:true},
+        {type:"line",label:"lower",data:rLo,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:false,order:3,spanGaps:true},
+        {type:"bar",label:"resting HR (360HP)",data:hpRHR,backgroundColor:C.red+"55",borderColor:C.red,borderWidth:1,borderRadius:3,order:2},
         {type:"line",label:"7-day avg",data:rAvg,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
       ]},options:baseOpts(deepMerge({},LEG))}));
     }
@@ -508,15 +521,36 @@
       {label:"sleep",data:rowsB.map(function(d){return d.o_sleepscore;}),borderColor:C.r30,borderWidth:2.2,pointRadius:0,tension:0.3}
     ],{scales:{y:{min:0,max:100}}});
 
-    // body temperature — diverging bars from zero, colour-coded (spikes above +0.5°C stand out)
+    // body temperature — diverging bars from zero, colour-coded, with a rolling-average line
     var hasTemp=rowsB.filter(function(d){return d.o_tempdev!=null;}).length>=2;
     if(hasTemp){
-      var cdT=card("Body temperature deviation","Each bar is how far last night's temp sat from your normal (0 = normal). Bars turn amber then red as they climb \u2014 above +0.5\u00b0C can signal illness or heavy stress.");
-      var cvT=mkCanvas(cdT,200);container.appendChild(cdT);
-      CHARTS.push(new Chart(cvT,{type:"bar",data:{labels:labels,datasets:[
-        {label:"temp \u0394\u00b0C",data:rowsB.map(function(d){return d.o_tempdev!=null?r1(d.o_tempdev):null;}),
-          backgroundColor:rowsB.map(function(d){var t=d.o_tempdev;if(t==null)return C.muted;return t>=0.5?C.red:t>=0.25?C.amber:C.green;}),borderRadius:3}
-      ]},options:baseOpts({scales:{y:{title:{display:true,text:"\u00b0C from normal",color:C.muted},grid:{color:function(ctx){return ctx.tick.value===0?C.muted:C.line;}}}}})}));
+      var tvals=rowsB.map(function(d){return d.o_tempdev!=null?r1(d.o_tempdev):null;});
+      var tRoll=tvals.map(function(_,i){var w=[];for(var k=Math.max(0,i-6);k<=i;k++){if(tvals[k]!=null)w.push(tvals[k]);}return w.length?r1(mean(w)):null;});
+      var cdT=card("Body temperature deviation","Bars are how far last night's temp sat from normal (0 = normal); amber/red as they climb. Dotted line is your 7-night rolling average.");
+      var cvT=mkCanvas(cdT,210);container.appendChild(cdT);
+      CHARTS.push(new Chart(cvT,{data:{labels:labels,datasets:[
+        {type:"bar",label:"temp \u0394\u00b0C",data:tvals,
+          backgroundColor:rowsB.map(function(d){var t=d.o_tempdev;if(t==null)return C.muted;return t>=0.5?C.red:t>=0.25?C.amber:C.green;}),borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:tRoll,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"\u00b0C from normal",color:C.muted},grid:{color:function(ctx){return ctx.tick.value===0?C.muted:C.line;}}}}},LEG))}));
+    }
+
+    // Oura resting heart rate — same style as the Trends RHR chart (bars + rolling avg + band)
+    var oRhr=rowsB.map(function(d){return d.o_rhr!=null?d.o_rhr:null;});
+    if(oRhr.filter(function(v){return v!=null;}).length>=2){
+      function orMean(i){var v=[];for(var k=Math.max(0,i-6);k<=i;k++){if(oRhr[k]!=null)v.push(oRhr[k]);}return v.length>=3?mean(v):null;}
+      function orSD(i){var v=[];for(var k=Math.max(0,i-6);k<=i;k++){if(oRhr[k]!=null)v.push(oRhr[k]);}return v.length>=3?stdev(v):null;}
+      var orAvg=oRhr.map(function(_,i){return r1(orMean(i));});
+      var orUp=oRhr.map(function(_,i){var m=orMean(i),sd=orSD(i);return (m!=null&&sd!=null)?r1(m+sd):null;});
+      var orLo=oRhr.map(function(_,i){var m=orMean(i),sd=orSD(i);return (m!=null&&sd!=null)?r1(m-sd):null;});
+      var cdOR=card("Resting heart rate (Oura)","Oura's overnight resting HR. Bars are daily; dotted line is your 7-day average; shaded band is \u00b11 SD.");
+      var cvOR=mkCanvas(cdOR,230);container.appendChild(cdOR);
+      CHARTS.push(new Chart(cvOR,{data:{labels:labels,datasets:[
+        {type:"line",label:"upper",data:orUp,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:"+1",order:3,spanGaps:true},
+        {type:"line",label:"lower",data:orLo,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:false,order:3,spanGaps:true},
+        {type:"bar",label:"resting HR (Oura)",data:oRhr,backgroundColor:C.red+"55",borderColor:C.red,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"7-day avg",data:orAvg,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({},LEG))}));
     }
 
     // sleep hours — bars with a rolling-average dotted line through them
@@ -535,24 +569,120 @@
     else { needSync(container,"Sleep-stage and hours detail needs the updated Oura relay (v2). Once it's deployed and synced, this fills in."); }
   }
 
+  function buildHP360(container,model){
+    destroyCharts();
+    if(!chartsReady()){noChart(container);return;}
+    Chart.defaults.font.family="Inter, system-ui, sans-serif"; Chart.defaults.color=C.muted;
+    var rowsB=model.filter(function(d){return d.has;});
+    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    if(rowsB.length<2){needSync(container,"Import your 360HP CSV to see your measures here.");return;}
+
+    // ---- B3: Raw HRV (rMSSD) + baseline ----
+    (function(){
+      var hp=rowsB.map(function(d){return d.hp_hrv!=null?d.hp_hrv:null;});
+      if(hp.filter(function(v){return v!=null;}).length<2) return;
+      var base=hp.map(function(_,i){var v=[];for(var k=Math.max(0,i-6);k<=i;k++){if(hp[k]!=null)v.push(hp[k]);}return v.length>=3?r1(median(v)):null;});
+      var cd=card("Raw HRV (rMSSD)","Your core 360HP number \u2014 morning rMSSD in ms. Bars are daily; the dotted line is your 7-day baseline. Gaps = no reading that day.");
+      var cv=mkCanvas(cd,230);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"bar",label:"rMSSD",data:hp.map(r1),backgroundColor:C.hrv+"66",borderColor:C.hrv,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"baseline",data:base,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"rMSSD (ms)",color:C.muted}}}},LEG))}));
+    })();
+
+    // ---- B2: Daily subjective score (0-10) + 7-day avg, colour-coded ----
+    (function(){
+      var sub=rowsB.map(function(d){return d.hp_subjective!=null?d.hp_subjective:null;});
+      if(sub.filter(function(v){return v!=null;}).length<2) return;
+      var roll=sub.map(function(_,i){var v=[];for(var k=Math.max(0,i-6);k<=i;k++){if(sub[k]!=null)v.push(sub[k]);}return v.length?r1(mean(v)):null;});
+      var cd=card("Subjective wellbeing (0\u201310)","How you rated yourself each day. Bars are colour-coded (red <5, amber <6.5, green above); the dotted line is your 7-day average.");
+      var cv=mkCanvas(cd,220);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"bar",label:"subjective",data:sub,backgroundColor:sub.map(function(v){return v==null?C.muted:v<5?C.red:v<6.5?C.amber:C.green;}),borderRadius:3,order:2},
+        {type:"line",label:"7-day avg",data:roll,borderColor:C.ink,borderWidth:2,borderDash:[5,3],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{min:0,max:10,title:{display:true,text:"score",color:C.muted}}}},LEG))}));
+    })();
+
+    // ---- B1: All 5 self-ratings over time (1-4) ----
+    (function(){
+      var fields=[["hp_sleep","Sleep",C.hrv],["hp_energy","Energy",C.green],["hp_diet","Diet",C.amber],["hp_exercise","Exercise",C.r30],["hp_happiness","Happiness",C.glow]];
+      var any=fields.some(function(f){return rowsB.filter(function(d){return d[f[0]]!=null;}).length>=2;});
+      if(!any) return;
+      var ds=fields.map(function(f){return {label:f[1],data:rowsB.map(function(d){return d[f[0]]!=null?d[f[0]]:null;}),borderColor:f[2],backgroundColor:"transparent",borderWidth:2,pointRadius:0,tension:0.35,spanGaps:true};});
+      var cd=card("Wellness self-ratings (1\u20134)","Your five daily 360HP ratings over time \u2014 sleep, energy, diet, exercise, happiness.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:ds},options:baseOpts(deepMerge({scales:{y:{min:1,max:4,ticks:{stepSize:1}}}},LEG))}));
+    })();
+
+    // ---- A1: How you feel vs HRV (over time, dual axis) ----
+    (function(){
+      var sub=rowsB.map(function(d){return d.hp_subjective!=null?d.hp_subjective:null;});
+      var hp=rowsB.map(function(d){return d.hp_hrv!=null?r1(d.hp_hrv):null;});
+      if(sub.filter(function(v){return v!=null;}).length<3||hp.filter(function(v){return v!=null;}).length<3) return;
+      var cd=card("How you feel vs HRV","Your subjective score (0\u201310) and HRV over time. When they rise and fall together, your gut read matches your physiology.");
+      var cv=mkCanvas(cd,230);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"line",label:"subjective",data:sub,borderColor:C.amber,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true,yAxisID:"y"},
+        {type:"line",label:"HRV",data:hp,borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true,yAxisID:"y1"}
+      ]},options:baseOpts(deepMerge({scales:{
+        y:{position:"left",min:0,max:10,title:{display:true,text:"subjective",color:C.muted}},
+        y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"HRV",color:C.muted}}
+      }},LEG))}));
+    })();
+
+    // ---- A2: Wellness balance radar (avg of each self-rating over the range) ----
+    (function(){
+      var fields=[["hp_sleep","Sleep"],["hp_energy","Energy"],["hp_diet","Diet"],["hp_exercise","Exercise"],["hp_happiness","Happiness"]];
+      var avgs=fields.map(function(f){var v=rowsB.map(function(d){return d[f[0]];}).filter(function(x){return x!=null;});return v.length?mean(v):null;});
+      if(avgs.filter(function(v){return v!=null;}).length<3) return;
+      var cd=card("Wellness balance","Your average self-rating for each area over this range \u2014 the shape shows where you're consistently strong or low.");
+      var cv=mkCanvas(cd,260);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{type:"radar",data:{labels:fields.map(function(f){return f[1];}),datasets:[
+        {label:"avg (1-4)",data:avgs.map(function(v){return v!=null?r1(v):null;}),borderColor:C.glow,backgroundColor:C.glow+"33",borderWidth:2,pointBackgroundColor:C.glow}
+      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{r:{min:0,max:4,ticks:{stepSize:1,color:C.muted,backdropColor:"transparent"},grid:{color:C.line},angleLines:{color:C.line},pointLabels:{color:C.ink,font:{size:12}}}}}}));
+    })();
+
+    // ---- A3: Which factor tracks your HRV best? (correlation bars) ----
+    (function(){
+      var hp=rowsB.map(function(d){return d.hp_hrv;});
+      var fields=[["hp_sleep","Sleep"],["hp_energy","Energy"],["hp_diet","Diet"],["hp_exercise","Exercise"],["hp_happiness","Happiness"],["hp_subjective","Subjective"]];
+      var res=[];
+      fields.forEach(function(f){
+        var xs=[],ys=[];
+        rowsB.forEach(function(d){ if(d[f[0]]!=null&&d.hp_hrv!=null){xs.push(d[f[0]]);ys.push(d.hp_hrv);} });
+        if(xs.length>=5){var r=pearson(xs,ys);if(r!=null)res.push({name:f[1],r:r});}
+      });
+      if(res.length<2) return;
+      res.sort(function(a,b){return b.r-a.r;});
+      var cd=card("What drives your HRV?","Correlation of each 360HP measure with your HRV. Bars to the right = higher on that measure goes with higher HRV; left = the opposite.");
+      var cv=mkCanvas(cd,230);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{type:"bar",data:{labels:res.map(function(x){return x.name;}),datasets:[
+        {label:"correlation with HRV",data:res.map(function(x){return r2(x.r);}),backgroundColor:res.map(function(x){return x.r>=0?C.green:C.red;}),borderRadius:3}
+      ]},options:baseOpts({indexAxis:"y",scales:{x:{min:-1,max:1,grid:{color:function(ctx){return ctx.tick.value===0?C.muted:C.line;}},title:{display:true,text:"correlation",color:C.muted}}}})}));
+    })();
+
+    // ---- A4: Subjective wellbeing vs HRV (scatter + best fit) ----
+    (function(){
+      var pts=rowsB.filter(function(d){return d.hp_subjective!=null&&d.hp_hrv!=null;}).map(function(d){return {x:d.hp_subjective,y:r1(d.hp_hrv)};});
+      if(pts.length<4) return;
+      var r=pearson(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
+      var cd=card("Subjective wellbeing vs HRV", r!=null?("Each dot is a day. r = "+r.toFixed(2)+(Math.abs(r)>0.5?" \u2014 they track closely.":Math.abs(r)>0.25?" \u2014 a moderate link.":" \u2014 a weak link.")):"How your daily self-rating lines up with HRV.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
+      var ds=[{type:"scatter",label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}];
+      var fit=linreg(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
+      if(fit){var xs=pts.map(function(p){return p.x;});var xmin=Math.min.apply(null,xs),xmax=Math.max.apply(null,xs);
+        ds.push({type:"line",label:"best fit",data:[{x:xmin,y:r1(fit.m*xmin+fit.b)},{x:xmax,y:r1(fit.m*xmax+fit.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
+      CHARTS.push(new Chart(cv,{data:{datasets:ds},options:baseOpts({scales:{x:{type:"linear",title:{display:true,text:"subjective (0\u201310)",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
+    })();
+  }
+
   function buildInsights(container,model){
     destroyCharts();
     if(!chartsReady()){noChart(container);return;}
     var rowsB=model.filter(function(d){return d.has;});
     if(rowsB.length<4){needSync(container,"Insights need a bit more history. Import your full 360HP CSV and sync Oura, then check back.");return;}
 
-    // sleep(360HP) vs HRV scatter + correlation
-    var pts=model.filter(function(d){return d.hp_sleep!=null&&d.hrv!=null;}).map(function(d){return {x:d.hp_sleep,y:r1(d.hrv)};});
-    if(pts.length>=4){
-      var r=pearson(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
-      var cd=card("Does 360HP sleep predict your HRV?", r!=null?("Sleep score (x, 1\u20134) vs HRV (y). r = "+r.toFixed(2)+"."):"Sleep vs HRV.");
-      var cv=mkCanvas(cd,240);container.appendChild(cd);
-      var ds=[{type:"scatter",label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}];
-      var fit=linreg(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
-      if(fit){ds.push({type:"line",label:"best fit",data:[{x:1,y:r1(fit.m*1+fit.b)},{x:4,y:r1(fit.m*4+fit.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
-      CHARTS.push(new Chart(cv,{data:{datasets:ds},
-        options:baseOpts({scales:{x:{type:"linear",min:1,max:4,ticks:{stepSize:1,precision:0},title:{display:true,text:"sleep score (1\u20134)",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
-    }
+    // (the "Does 360HP sleep predict your HRV?" scatter moved to the new 360HP tab)
 
     // ---- Option D: rolling sleep vs rolling HRV scatter, dots shaded by time + best fit ----
     (function(){
@@ -781,28 +911,43 @@
 
   // ---------- Training tab (gym sheet) ----------
   var gymStatus={state:"idle",msg:""};
-  // find the most recent prior logged session for an exercise, fuzzy-matched by name
-  function normEx(s){return (s||"").toLowerCase().replace(/[^a-z0-9 ]/g,"").replace(/\s+/g," ").trim();}
-  function findPrevLift(exName){
-    var hist=getJSON(K_LOGHIST,[]);
+  // strip the "A1)" style prefix and normalise an exercise name for matching
+  function normEx(s){return (s||"").toLowerCase().replace(/^[a-z]\d*\)\s*/,"").replace(/[^a-z0-9 ]/g,"").replace(/\s+/g," ").trim();}
+  function fuzzyMatch(a,b){
+    if(!a||!b) return false;
+    if(a===b) return true;
+    if(a.indexOf(b)>=0||b.indexOf(a)>=0) return true;
+    var aw=a.split(" ").filter(function(w){return w.length>2;});
+    var bw=b.split(" ");
+    if(!aw.length) return false;
+    var shared=aw.filter(function(w){return bw.indexOf(w)>=0;}).length;
+    return shared/aw.length>=0.5;
+  }
+  // find the most recent PRIOR week (from sheet history) where this exercise was done.
+  // currentOrder = the tab order of the week being viewed, so we only look further back.
+  function findPrevLift(exName,currentOrder){
+    var gym=getJSON(K_GYM,null);
+    var hist=(gym&&gym.history)?gym.history:[];
     if(!hist.length) return null;
     var target=normEx(exName);
     if(!target) return null;
-    var tWords=target.split(" ").filter(function(w){return w.length>2;});
     var matches=hist.filter(function(l){
-      var n=normEx(l.exercise);
-      if(!n) return false;
-      if(n===target) return true;                 // exact
-      if(n.indexOf(target)>=0||target.indexOf(n)>=0) return true; // one contains the other
-      // word overlap: at least half of the meaningful words shared
-      var nWords=n.split(" ");
-      var shared=tWords.filter(function(w){return nWords.indexOf(w)>=0;}).length;
-      return tWords.length>0 && shared/tWords.length>=0.5;
+      if(currentOrder!=null && l.order!=null && l.order>=currentOrder) return false; // only earlier weeks
+      return fuzzyMatch(target,normEx(l.exercise));
     });
     if(!matches.length) return null;
-    // most recent by date then timestamp
-    matches.sort(function(a,b){ if(a.date!==b.date) return a.date<b.date?1:-1; return (b.ts||0)-(a.ts||0); });
-    return matches[0];
+    // most recent prior = highest order (falls back to last in list)
+    matches.sort(function(a,b){ return (b.order||0)-(a.order||0); });
+    var m=matches[0];
+    // map sheet 'sets' (H-K strings) to the weights array the UI expects
+    return {exercise:m.exercise, week:m.week, date:m.date, weights:m.sets||[], vels:null};
+  }
+  // resolve the current week's tab order from the loaded programme (for the "prior only" filter)
+  function weekOrder(weekName){
+    var gym=getJSON(K_GYM,null);
+    var hist=(gym&&gym.history)?gym.history:[];
+    for(var i=0;i<hist.length;i++){ if(hist[i].week===weekName && hist[i].order!=null) return hist[i].order; }
+    return null;
   }
 
   function buildTraining(container,model){
@@ -892,7 +1037,7 @@
         (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'')+
         (ex.last?'<div class="ssrc" style="color:'+C.muted+';margin-bottom:8px">Last time: '+ex.last+'</div>':'');
       // 4 sets, each with a weight input and a velocity input beneath it
-      var prev=findPrevLift(ex.name); // most recent prior session for this exercise (fuzzy)
+      var prev=findPrevLift(ex.name, weekOrder(wk.name)); // most recent PRIOR week this exercise was done (fuzzy, from sheet history)
       var grid=document.createElement("div");grid.style.cssText="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;";
       var inputs=[]; var vels=[];
       var inpCss="padding:9px 6px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;text-align:center;width:100%;";
@@ -990,7 +1135,7 @@
   var PREVTAB=null;
   var RANGE="14"; // date filter for chart tabs: 7 | 14 | 30 | 90 | 180 | all | custom (default 14d)
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
-  var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
+  var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"]];
 
   function render(savedFlash){
     var keepScroll=(typeof window!=="undefined"&&window.pageYOffset)?window.pageYOffset:0;
@@ -1062,7 +1207,7 @@
     var body=document.createElement("div");app.appendChild(body);
 
     // date-range filter — applies to the data/chart tabs (not Today or Training)
-    var rangeTabs={trends:1,compare:1,oura:1,insights:1,history:1};
+    var rangeTabs={trends:1,compare:1,oura:1,insights:1,history:1,hp360:1};
     var fmodel=model;
     if(rangeTabs[TAB]){
       // preset dropdown
@@ -1175,6 +1320,7 @@
     else if(TAB==="history") buildHistory(body,fmodel);
     else if(TAB==="training") buildTraining(body,model);
     else if(TAB==="oura") buildOura(body,fmodel);
+    else if(TAB==="hp360") buildHP360(body,fmodel);
     else if(TAB==="insights") buildInsights(body,fmodel);
 
     var foot=document.createElement("div");foot.className="foot";
