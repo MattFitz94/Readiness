@@ -132,6 +132,7 @@
 
   var C={ bg:"#04141A",panel:"#0A2028",panel2:"#0E2A34",line:"#123845",ink:"#DCEEF0",muted:"#6E9AA0",
     glow:"#3DE0C8",green:"#2FE6B0",greenSoft:"#0E3A38",amber:"#E8B65A",amberSoft:"#3A3018",
+    yellow:"#E8B65A",yellowSoft:"#3A3018",
     red:"#FF6B6B",redSoft:"#3A1C22",hrv:"#57C7FF",hrvBand:"rgba(87,199,255,0.14)",r7:"#2FE6B0",r30:"#8A7DFF",oura:"#2FE6B0",temp:"#E8B65A" };
 
   // ==== YOUR RELAY ADDRESS ====
@@ -159,6 +160,10 @@
   function pearson(xs,ys){var n=xs.length;if(n<4)return null;var mx=mean(xs),my=mean(ys),nu=0,dx=0,dy=0;
     for(var i=0;i<n;i++){var a=xs[i]-mx,b=ys[i]-my;nu+=a*b;dx+=a*a;dy+=b*b;}if(!dx||!dy)return null;return nu/Math.sqrt(dx*dy);}
   function r1(v){return v==null?null:Math.round(v*10)/10;}
+  // least-squares best fit; returns {m,b} for y = m*x + b, or null
+  function linreg(xs,ys){var n=xs.length;if(n<2)return null;var mx=mean(xs),my=mean(ys),num=0,den=0;
+    for(var i=0;i<n;i++){var dx=xs[i]-mx;num+=dx*(ys[i]-my);den+=dx*dx;}if(!den)return null;
+    var m=num/den;return {m:m,b:my-m*mx};}
 
   // ---------- data fusion ----------
   // Build a per-day map keyed by YYYY-MM-DD merging 360HP rows + Oura cache.
@@ -445,11 +450,20 @@
       ]},options:baseOpts()}));})();
 
     // scatter agreement
-    (function(){var cd=card("Agreement scatter","Each dot is a day. The tighter the dots hug a diagonal line, the more your two devices agree.");
+    (function(){var cd=card("Agreement scatter","Each dot is a day. The dashed line is the best fit \u2014 the closer dots sit to it, the more your two devices agree.");
       var cv=mkCanvas(cd,240);container.appendChild(cd);
       var pts=both.map(function(d){return {x:r1(d.o_hrv),y:r1(d.hp_hrv)};});
-      CHARTS.push(new Chart(cv,{type:"scatter",data:{datasets:[{label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}]},
-        options:baseOpts({scales:{x:{title:{display:true,text:"Oura HRV",color:C.muted}},y:{title:{display:true,text:"360HP HRV",color:C.muted}}}})}));})();
+      var datasets=[{type:"scatter",label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}];
+      var fit=linreg(both.map(function(d){return d.o_hrv;}),both.map(function(d){return d.hp_hrv;}));
+      if(fit){
+        var xsv=both.map(function(d){return d.o_hrv;});
+        var xmin=Math.min.apply(null,xsv), xmax=Math.max.apply(null,xsv);
+        datasets.push({type:"line",label:"best fit",
+          data:[{x:r1(xmin),y:r1(fit.m*xmin+fit.b)},{x:r1(xmax),y:r1(fit.m*xmax+fit.b)}],
+          borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});
+      }
+      CHARTS.push(new Chart(cv,{data:{datasets:datasets},
+        options:baseOpts({scales:{x:{type:"linear",title:{display:true,text:"Oura HRV",color:C.muted}},y:{title:{display:true,text:"360HP HRV",color:C.muted}}}})}));})();
 
     var r=pearson(both.map(function(d){return d.o_hrv;}),both.map(function(d){return d.hp_hrv;}));
     if(r!=null){var ins=document.createElement("div");ins.className="insight";
@@ -477,17 +491,30 @@
       {label:"sleep",data:rowsB.map(function(d){return d.o_sleepscore;}),borderColor:C.r30,borderWidth:2.2,pointRadius:0,tension:0.3}
     ],{scales:{y:{min:0,max:100}}});
 
-    // body temperature alone with danger line
+    // body temperature — diverging bars from zero, colour-coded (spikes above +0.5°C stand out)
     var hasTemp=rowsB.filter(function(d){return d.o_tempdev!=null;}).length>=2;
-    if(hasTemp) lineChart(container,"Body temperature deviation","How far last night's temp sat from your normal. Above +0.5\u00b0C can signal illness or heavy stress.",labels,[
-      {label:"temp \u0394\u00b0C",data:rowsB.map(function(d){return d.o_tempdev;}),borderColor:C.temp,borderWidth:2.2,pointRadius:0,tension:0.3}
-    ],{});
+    if(hasTemp){
+      var cdT=card("Body temperature deviation","Each bar is how far last night's temp sat from your normal (0 = normal). Bars turn amber then red as they climb \u2014 above +0.5\u00b0C can signal illness or heavy stress.");
+      var cvT=mkCanvas(cdT,200);container.appendChild(cdT);
+      CHARTS.push(new Chart(cvT,{type:"bar",data:{labels:labels,datasets:[
+        {label:"temp \u0394\u00b0C",data:rowsB.map(function(d){return d.o_tempdev!=null?r1(d.o_tempdev):null;}),
+          backgroundColor:rowsB.map(function(d){var t=d.o_tempdev;if(t==null)return C.muted;return t>=0.5?C.red:t>=0.25?C.amber:C.green;}),borderRadius:3}
+      ]},options:baseOpts({scales:{y:{title:{display:true,text:"\u00b0C from normal",color:C.muted},grid:{color:function(ctx){return ctx.tick.value===0?C.muted:C.line;}}}}})}));
+    }
 
-    // sleep hours if v2 present
+    // sleep hours — bars with a rolling-average dotted line through them
     var hasHrs=rowsB.filter(function(d){return d.o_sleephrs!=null;}).length>=2;
-    if(hasHrs){ lineChart(container,"Time asleep (hours)","Total sleep per night from Oura's detailed data.",labels,[
-      {label:"hours",data:rowsB.map(function(d){return d.o_sleephrs;}),borderColor:C.green,borderWidth:2.2,pointRadius:0,tension:0.3}
-    ],{}); }
+    if(hasHrs){
+      var hrs=rowsB.map(function(d){return d.o_sleephrs!=null?d.o_sleephrs:null;});
+      // 7-night rolling average (uses available nights up to 7)
+      var roll=hrs.map(function(_,i){var w=[];for(var k=Math.max(0,i-6);k<=i;k++){if(hrs[k]!=null)w.push(hrs[k]);}return w.length?r1(mean(w)):null;});
+      var cdH=card("Time asleep (hours)","Bars are each night's sleep. The dotted line is your 7-night rolling average \u2014 the trend under the night-to-night noise.");
+      var cvH=mkCanvas(cdH,210);container.appendChild(cdH);
+      CHARTS.push(new Chart(cvH,{data:{labels:labels,datasets:[
+        {type:"bar",label:"hours",data:hrs,backgroundColor:C.hrv+"66",borderColor:C.hrv,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:roll,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"hours",color:C.muted}}}},LEG))}));
+    }
     else { needSync(container,"Sleep-stage and hours detail needs the updated Oura relay (v2). Once it's deployed and synced, this fills in."); }
   }
 
