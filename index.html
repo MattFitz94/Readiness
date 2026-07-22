@@ -534,6 +534,73 @@
         options:baseOpts({scales:{x:{min:0.5,max:4.5,ticks:{stepSize:1},title:{display:true,text:"sleep score",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
     }
 
+    // ---- Option D: rolling sleep vs rolling HRV scatter, dots shaded by time + best fit ----
+    (function(){
+      var hasHrs=model.filter(function(d){return d.o_sleephrs!=null;}).length;
+      if(hasHrs>=4){
+        var sleepRoll=[], hrvRoll=[];
+        for(var i=0;i<model.length;i++){
+          var sW=[], hW=[];
+          for(var k=Math.max(0,i-6);k<=i;k++){
+            if(model[k].o_sleephrs!=null) sW.push(model[k].o_sleephrs);
+            if(model[k].hrv!=null) hW.push(model[k].hrv);
+          }
+          sleepRoll.push(sW.length?mean(sW):null);
+          hrvRoll.push(hW.length?mean(hW):null);
+        }
+        var pts=[], idx=[];
+        for(var j=0;j<model.length;j++){ if(sleepRoll[j]!=null&&hrvRoll[j]!=null){ pts.push({x:r1(sleepRoll[j]),y:r1(hrvRoll[j])}); idx.push(j); } }
+        if(pts.length>=4){
+          // colour dots dark->bright by recency (older = muted blue, newer = bright glow)
+          var cols=idx.map(function(_,i){var t=pts.length>1?i/(pts.length-1):1;
+            // interpolate hrv-blue (#3A6B8C-ish) -> glow (#3DE0C8)
+            function mix(a,b,t){return Math.round(a+(b-a)*t);}
+            var r=mix(0x3A,0x3D,t),g=mix(0x6B,0xE0,t),b=mix(0x8C,0xC8,t);
+            return "rgb("+r+","+g+","+b+")";});
+          var fit=linreg(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
+          var rr=pearson(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
+          var note="Each dot is one week (rolling avg). Dots brighten from oldest to newest \u2014 if the bright ones sit up-and-right, you're trending toward more sleep and higher HRV.";
+          if(rr!=null) note+=" r = "+rr.toFixed(2)+(Math.abs(rr)>0.5?" \u2014 they track closely.":Math.abs(rr)>0.25?" \u2014 a moderate link.":" \u2014 a weak link for you.");
+          var cd=card("Sleep vs HRV \u2014 does more sleep lift it?",note);
+          var cv=mkCanvas(cd,240);container.appendChild(cd);
+          var ds=[{type:"scatter",label:"week",data:pts,backgroundColor:cols,pointRadius:5}];
+          if(fit){var xmin=Math.min.apply(null,pts.map(function(p){return p.x;})),xmax=Math.max.apply(null,pts.map(function(p){return p.x;}));
+            ds.push({type:"line",label:"best fit",data:[{x:r1(xmin),y:r1(fit.m*xmin+fit.b)},{x:r1(xmax),y:r1(fit.m*xmax+fit.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
+          CHARTS.push(new Chart(cv,{data:{datasets:ds},options:baseOpts({scales:{
+            x:{type:"linear",title:{display:true,text:"7-day avg sleep (hrs)",color:C.muted}},
+            y:{title:{display:true,text:"7-day avg HRV",color:C.muted}}}})}));
+        }
+      } else {
+        needSync(container,"Sleep vs HRV charts appear here once Oura sleep-hours data is flowing (needs the v2 relay deployed).");
+      }
+    })();
+
+    // ---- Option E: how much you slept -> next-day HRV vs your average ----
+    (function(){
+      // pair each night's sleep hours with NEXT day's HRV, expressed vs the mean HRV
+      var pairs=[];
+      for(var i=0;i<model.length-1;i++){
+        if(model[i].o_sleephrs!=null && model[i+1].hrv!=null) pairs.push({sleep:model[i].o_sleephrs, nextHrv:model[i+1].hrv});
+      }
+      if(pairs.length>=4){
+        var allHrv=pairs.map(function(p){return p.nextHrv;});
+        var mH=mean(allHrv);
+        var buckets=[{lab:"<6.5h",lo:0,hi:6.5},{lab:"6.5\u20137h",lo:6.5,hi:7},{lab:"7\u20137.5h",lo:7,hi:7.5},{lab:">7.5h",lo:7.5,hi:99}];
+        var vals=buckets.map(function(b){
+          var hv=pairs.filter(function(p){return p.sleep>=b.lo&&p.sleep<b.hi;}).map(function(p){return p.nextHrv;});
+          return hv.length?r1(mean(hv)-mH):null;
+        });
+        // only show if at least 2 buckets have data
+        if(vals.filter(function(v){return v!=null;}).length>=2){
+          var cd2=card("How much you slept \u2192 next-day HRV","Grouped by how much you slept, this shows how your HRV the next day came out vs your average. Bars climbing left-to-right = more sleep pays off.");
+          var cv2=mkCanvas(cd2,210);container.appendChild(cd2);
+          CHARTS.push(new Chart(cv2,{type:"bar",data:{labels:buckets.map(function(b){return b.lab;}),datasets:[
+            {label:"next-day HRV vs avg",data:vals,backgroundColor:vals.map(function(v){return v==null?C.muted:v>=0?C.green:C.red;}),borderRadius:3}
+          ]},options:baseOpts({scales:{y:{title:{display:true,text:"HRV vs your average",color:C.muted},grid:{color:function(ctx){return ctx.tick.value===0?C.muted:C.line;}}}}})}));
+        }
+      }
+    })();
+
     // Oura sleep vs next-day HRV correlation insight
     var pairs=[];
     for(var i=1;i<model.length;i++){ var prev=model[i-1],cur=model[i];
@@ -862,6 +929,8 @@
   var TAB="today";
   var TABSCROLL=0;
   var PREVTAB=null;
+  var RANGE="all"; // date filter for chart tabs: 30 | 90 | 180 | all | custom
+  var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
   var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
 
   function render(savedFlash){
@@ -933,6 +1002,48 @@
 
     var body=document.createElement("div");app.appendChild(body);
 
+    // date-range filter — applies to the data/chart tabs (not Today or Training)
+    var rangeTabs={trends:1,compare:1,oura:1,insights:1,history:1};
+    var fmodel=model;
+    if(rangeTabs[TAB]){
+      // preset buttons
+      var rsel=document.createElement("div");rsel.style.cssText="display:flex;gap:6px;overflow-x:auto;margin-bottom:10px;scrollbar-width:none;";
+      var opts=[["30","30 days"],["90","90 days"],["180","6 months"],["all","All"]];
+      opts.forEach(function(o){var b=document.createElement("button");
+        b.className="btn "+(RANGE===o[0]?"btn-primary":"btn-ghost");b.style.cssText="padding:7px 14px;font-size:13px;white-space:nowrap;flex:0 0 auto;";
+        b.textContent=o[1];b.onclick=function(){RANGE=o[0];RFROM="";RTO="";render(false);};rsel.appendChild(b);});
+      body.appendChild(rsel);
+
+      // custom calendar range (From / To)
+      var crow=document.createElement("div");crow.style.cssText="display:flex;gap:8px;align-items:center;margin-bottom:14px;flex-wrap:wrap;";
+      var dateCss="padding:8px 10px;border-radius:8px;border:1px solid "+(RANGE==="custom"?C.glow+"88":C.line)+";background:"+C.panel2+";color:"+C.ink+";font-size:14px;";
+      var fromL=document.createElement("span");fromL.style.cssText="font-size:12px;color:"+C.muted+";";fromL.textContent="From";
+      var fromI=document.createElement("input");fromI.type="date";fromI.value=RFROM;fromI.style.cssText=dateCss;
+      var toL=document.createElement("span");toL.style.cssText="font-size:12px;color:"+C.muted+";";toL.textContent="To";
+      var toI=document.createElement("input");toI.type="date";toI.value=RTO;toI.style.cssText=dateCss;
+      function applyCustom(){ RFROM=fromI.value; RTO=toI.value; if(RFROM||RTO){RANGE="custom";} render(false); }
+      fromI.addEventListener("change",applyCustom); toI.addEventListener("change",applyCustom);
+      crow.appendChild(fromL);crow.appendChild(fromI);crow.appendChild(toL);crow.appendChild(toI);
+      if(RANGE==="custom"){var clr=document.createElement("button");clr.className="btn btn-ghost";clr.style.cssText="padding:7px 12px;font-size:12px;";clr.textContent="Clear";
+        clr.onclick=function(){RANGE="all";RFROM="";RTO="";render(false);};crow.appendChild(clr);}
+      body.appendChild(crow);
+
+      // apply the filter
+      if(RANGE==="custom"&&(RFROM||RTO)){
+        fmodel=model.filter(function(d){return (!RFROM||d.iso>=RFROM)&&(!RTO||d.iso<=RTO);});
+      } else if(RANGE!=="all"&&RANGE!=="custom"){
+        var days=parseInt(RANGE,10);
+        var cutoff=new Date(); cutoff.setDate(cutoff.getDate()-days);
+        var cutISO=cutoff.toISOString().slice(0,10);
+        fmodel=model.filter(function(d){return d.iso>=cutISO;});
+      }
+      if(fmodel!==model && fmodel.length<2){
+        var rn=document.createElement("div");rn.className="cnote";rn.style.marginBottom="12px";
+        rn.textContent="Only "+fmodel.length+" day(s) in this range \u2014 widen it for fuller charts.";
+        body.appendChild(rn);
+      }
+    }
+
     if(TAB==="today"){
       var bc=C[today.band], bs=C[today.band+"Soft"];
       var v=document.createElement("div");v.className="verdict";
@@ -998,12 +1109,12 @@
       var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){localStorage.removeItem(K_ROWS);localStorage.removeItem(K_OURA);localStorage.removeItem(K_OURATIME);render(false);}};
       btns.appendChild(b1);btns.appendChild(b2);body.appendChild(btns);
     }
-    else if(TAB==="trends") buildTrends(body,model);
-    else if(TAB==="compare") buildCompare(body,model);
-    else if(TAB==="history") buildHistory(body,model);
+    else if(TAB==="trends") buildTrends(body,fmodel);
+    else if(TAB==="compare") buildCompare(body,fmodel);
+    else if(TAB==="history") buildHistory(body,fmodel);
     else if(TAB==="training") buildTraining(body,model);
-    else if(TAB==="oura") buildOura(body,model);
-    else if(TAB==="insights") buildInsights(body,model);
+    else if(TAB==="oura") buildOura(body,fmodel);
+    else if(TAB==="insights") buildInsights(body,fmodel);
 
     var foot=document.createElement("div");foot.className="foot";
     foot.textContent="Signal, not diagnosis. This fuses trends across your own data to suggest how hard to go \u2014 it doesn't replace how you actually feel or medical advice. When your two sources disagree, it tells you and leans cautious.";
