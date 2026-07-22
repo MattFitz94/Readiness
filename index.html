@@ -720,9 +720,29 @@
     // the chosen day's exercises, each loggable
     var day=days[sel.d];
     if(!day){needSync(container,"No day selected.");return;}
+    var isWarmup=/warm/i.test(wk.name||"")||/warm/i.test(day.label||"");
     var logInputs=[]; // {exercise, inputs:[4], doneEl}
     (day.exercises||[]).forEach(function(ex){
       var c=document.createElement("div");c.className="card";
+
+      // Warm-up movements: simple checklist — name, reps/instruction, and a tick. No weight/velocity.
+      if(isWarmup){
+        var repTxt=ex.reps||ex.sets||"";
+        c.innerHTML='<div style="font-weight:700;font-size:15px;color:'+C.ink+'">'+ex.name+'</div>'+
+          (repTxt?'<div class="cnote" style="margin:3px 0 0">'+repTxt+'</div>':'');
+        var wWrap=document.createElement("div");wWrap.style.cssText="display:flex;align-items:center;gap:10px;margin-top:10px;cursor:pointer;";
+        var wBox=document.createElement("div");wBox.className="chkbox";
+        var wState={on:false};
+        var wLbl=document.createElement("span");wLbl.style.cssText="font-size:13px;font-weight:600;color:"+C.muted+";";wLbl.textContent="Done";
+        function wpaint(){ wBox.className="chkbox"+(wState.on?" on":""); wLbl.textContent=wState.on?"Done \u2713":"Done"; wLbl.style.color=wState.on?C.green:C.muted; }
+        wWrap.onclick=function(){ wState.on=!wState.on; wpaint(); };
+        wpaint();
+        wWrap.appendChild(wBox);wWrap.appendChild(wLbl);
+        c.appendChild(wWrap);
+        container.appendChild(c);
+        return; // no logging inputs for warm-up movements
+      }
+
       var meta=[];
       if(ex.sets) meta.push(ex.sets+" sets"); if(ex.reps) meta.push(ex.reps+" reps");
       c.innerHTML='<div style="font-weight:700;font-size:15px;color:'+C.ink+'">'+ex.name+'</div>'+
@@ -763,6 +783,13 @@
     });
 
     // save button -> POST to sheet
+    // save button -> POST to sheet (not shown for warm-ups; they're just a checklist)
+    if(isWarmup){
+      var wnote=document.createElement("div");wnote.className="cnote";wnote.style.cssText="margin-top:6px;text-align:center;";
+      wnote.textContent="Warm-up checklist \u2014 tick movements as you go. Nothing to log here.";
+      container.appendChild(wnote);
+      return;
+    }
     var saveWrap=document.createElement("div");saveWrap.className="btnrow";
     var saveBtn=document.createElement("button");saveBtn.className="btn btn-primary";
     saveBtn.textContent=gymStatus.state==="saving"?"Saving\u2026":"Log this session";
