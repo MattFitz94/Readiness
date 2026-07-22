@@ -181,6 +181,7 @@
         days[iso].hp_hrv=parseFloat(r.rMSSD);
         days[iso].hp_rhr=r.RHR?parseFloat(r.RHR):null;
         days[iso].hp_subjective=r.subjective?parseFloat(r.subjective):null;
+        days[iso].hp_objective=r.objective?parseFloat(r.objective):null;
         days[iso].hp_sleep=r.sleep?parseFloat(r.sleep):null;
         days[iso].hp_energy=r.energy?parseFloat(r.energy):null;
         days[iso].hp_diet=r.diet?parseFloat(r.diet):null;
@@ -590,6 +591,19 @@
       ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"rMSSD (ms)",color:C.muted}}}},LEG))}));
     })();
 
+    // ---- Objective score + rolling baseline ----
+    (function(){
+      var obj=rowsB.map(function(d){return d.hp_objective!=null?d.hp_objective:null;});
+      if(obj.filter(function(v){return v!=null;}).length<2) return;
+      var base=obj.map(function(_,i){var v=[];for(var k=Math.max(0,i-6);k<=i;k++){if(obj[k]!=null)v.push(obj[k]);}return v.length>=3?r1(median(v)):null;});
+      var cd=card("Objective score vs rolling baseline","Your 360HP objective score. Bars are daily; the dotted line is your 7-day baseline. Bars under the line = below your normal.");
+      var cv=mkCanvas(cd,230);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"bar",label:"objective",data:obj.map(r1),backgroundColor:C.glow+"55",borderColor:C.glow,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"baseline",data:base,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"objective score",color:C.muted}}}},LEG))}));
+    })();
+
     // ---- B2: Daily subjective score (0-10) + 7-day avg, colour-coded ----
     (function(){
       var sub=rowsB.map(function(d){return d.hp_subjective!=null?d.hp_subjective:null;});
@@ -614,19 +628,19 @@
       CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:ds},options:baseOpts(deepMerge({scales:{y:{min:1,max:4,ticks:{stepSize:1}}}},LEG))}));
     })();
 
-    // ---- A1: How you feel vs HRV (over time, dual axis) ----
+    // ---- A1: How you feel vs your objective score (over time, dual axis) ----
     (function(){
       var sub=rowsB.map(function(d){return d.hp_subjective!=null?d.hp_subjective:null;});
-      var hp=rowsB.map(function(d){return d.hp_hrv!=null?r1(d.hp_hrv):null;});
-      if(sub.filter(function(v){return v!=null;}).length<3||hp.filter(function(v){return v!=null;}).length<3) return;
-      var cd=card("How you feel vs HRV","Your subjective score (0\u201310) and HRV over time. When they rise and fall together, your gut read matches your physiology.");
+      var obj=rowsB.map(function(d){return d.hp_objective!=null?r1(d.hp_objective):null;});
+      if(sub.filter(function(v){return v!=null;}).length<3||obj.filter(function(v){return v!=null;}).length<3) return;
+      var cd=card("How you feel vs your objective score","Your subjective score (0\u201310, how you felt) and your 360HP objective score over time. When they diverge, your gut read and the numbers disagree.");
       var cv=mkCanvas(cd,230);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
         {type:"line",label:"subjective",data:sub,borderColor:C.amber,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true,yAxisID:"y"},
-        {type:"line",label:"HRV",data:hp,borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true,yAxisID:"y1"}
+        {type:"line",label:"objective",data:obj,borderColor:C.glow,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true,yAxisID:"y1"}
       ]},options:baseOpts(deepMerge({scales:{
         y:{position:"left",min:0,max:10,title:{display:true,text:"subjective",color:C.muted}},
-        y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"HRV",color:C.muted}}
+        y1:{position:"right",grid:{drawOnChartArea:false},title:{display:true,text:"objective",color:C.muted}}
       }},LEG))}));
     })();
 
@@ -950,6 +964,78 @@
     return null;
   }
 
+  var K_GYMTRENDSEL="readiness_gymtrend_ex_v1"; // remembers the picked exercise
+  function buildGymTrends(container){
+    destroyCharts();
+    Chart.defaults.font.family="Inter, system-ui, sans-serif"; Chart.defaults.color=C.muted;
+    var gym=getJSON(K_GYM,null);
+    var hist=(gym&&gym.history)?gym.history:[];
+    if(!hist.length){
+      needSync(container,"No training history yet. Deploy Apps Script v4 and tap \u201cSync programme\u201d on the Training tab \u2014 these charts read your logged weeks from the sheet.");
+      return;
+    }
+
+    // group history by normalised exercise name; keep display name + records
+    var groups={};
+    hist.forEach(function(h){
+      var key=normEx(h.exercise);
+      if(!key) return;
+      if(!groups[key]) groups[key]={name:h.exercise, recs:[]};
+      // avg of the numeric sets done that session
+      var nums=(h.sets||[]).map(function(x){return parseFloat(x);}).filter(function(x){return !isNaN(x)&&x>0;});
+      var avg=nums.length?mean(nums):null;
+      var top=nums.length?Math.max.apply(null,nums):null;
+      groups[key].recs.push({week:h.week, order:h.order||0, avg:avg, top:top, done:true});
+    });
+    // sort each group's records by week order
+    Object.keys(groups).forEach(function(k){ groups[k].recs.sort(function(a,b){return a.order-b.order;}); });
+
+    // exercises sorted by how many sessions (most-trained first)
+    var exKeys=Object.keys(groups).sort(function(a,b){return groups[b].recs.length-groups[a].recs.length;});
+
+    // ---- exercise picker ----
+    var sel=get(K_GYMTRENDSEL); if(!sel||!groups[sel]) sel=exKeys[0];
+    var pickCard=document.createElement("div");pickCard.className="card";
+    var plab=document.createElement("div");plab.style.cssText="font-size:12px;color:"+C.muted+";margin-bottom:6px;";plab.textContent="Exercise";
+    var dd=document.createElement("select");dd.style.cssText="width:100%;padding:10px 11px;border-radius:8px;border:1px solid "+C.glow+"66;background:"+C.panel2+";color:"+C.ink+";font-size:15px;";
+    exKeys.forEach(function(k){var op=document.createElement("option");op.value=k;op.textContent=groups[k].name.replace(/^[A-Z]\d*\)\s*/,"")+"  ("+groups[k].recs.length+"\u00d7)";if(k===sel)op.selected=true;dd.appendChild(op);});
+    dd.onchange=function(){set(K_GYMTRENDSEL,dd.value);render(false);};
+    pickCard.appendChild(plab);pickCard.appendChild(dd);container.appendChild(pickCard);
+
+    // ---- weight over time for the picked exercise (average of sets done) ----
+    (function(){
+      var g=groups[sel]; if(!g) return;
+      var recs=g.recs.filter(function(r){return r.avg!=null;});
+      var cd=card("Weight over time \u2014 "+g.name.replace(/^[A-Z]\d*\)\s*/,""),"Average of the sets you did each session, in week order. The dotted line is your top set that day.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
+      if(recs.length<1){var e=document.createElement("div");e.className="cnote";e.style.padding="8px 4px";e.textContent="No weighted sessions recorded for this exercise (it may be bodyweight or marked with an X).";cd.appendChild(e);return;}
+      CHARTS.push(new Chart(cv,{data:{labels:recs.map(function(r){return r.week.replace(/\s*\(.*\)/,"").slice(0,14);}),datasets:[
+        {type:"line",label:"avg of sets",data:recs.map(function(r){return r1(r.avg);}),borderColor:C.green,backgroundColor:C.green+"22",borderWidth:2.6,pointRadius:3,pointBackgroundColor:C.green,tension:0.25,fill:true,order:2},
+        {type:"line",label:"top set",data:recs.map(function(r){return r.top;}),borderColor:C.amber,borderWidth:1.5,borderDash:[4,3],pointRadius:0,tension:0.25,order:1}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"kg",color:C.muted}}}},LEG))}));
+    })();
+
+    // ---- sessions completed per week (across all exercises) ----
+    (function(){
+      var byWeek={}, order={};
+      hist.forEach(function(h){ var w=h.week; byWeek[w]=(byWeek[w]||0)+1; order[w]=h.order||0; });
+      var weeks=Object.keys(byWeek).sort(function(a,b){return order[a]-order[b];});
+      if(weeks.length<1) return;
+      var cd=card("Sessions logged per week","How many exercises you completed each week (any set with a weight or an X counts).");
+      var cv=mkCanvas(cd,220);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{type:"bar",data:{labels:weeks.map(function(w){return w.replace(/\s*\(.*\)/,"").slice(0,14);}),datasets:[
+        {label:"exercises done",data:weeks.map(function(w){return byWeek[w];}),backgroundColor:C.hrv+"88",borderColor:C.hrv,borderWidth:1,borderRadius:3}
+      ]},options:baseOpts({scales:{y:{title:{display:true,text:"exercises",color:C.muted},ticks:{precision:0}}}})}));
+    })();
+
+    // ---- summary line ----
+    var totalSessions=hist.length;
+    var distinctEx=exKeys.length;
+    var sumCard=document.createElement("div");sumCard.className="cnote";sumCard.style.cssText="text-align:center;color:"+C.muted+";margin-top:4px;";
+    sumCard.textContent=totalSessions+" logged sessions across "+distinctEx+" exercises, from your sheet history.";
+    container.appendChild(sumCard);
+  }
+
   function buildTraining(container,model){
     var gym=getJSON(K_GYM,null);
     var today=model.length?model[model.length-1]:null;
@@ -1008,6 +1094,17 @@
     var day=days[sel.d];
     if(!day){needSync(container,"No day selected.");return;}
     var isWarmup=/warm/i.test(wk.name||"")||/warm/i.test(day.label||"");
+
+    // history diagnostic — tells you at a glance if v4 cross-week history arrived
+    if(!isWarmup){
+      var histN=(gym&&gym.history)?gym.history.length:0;
+      var diag=document.createElement("div");diag.className="ssrc";
+      diag.style.cssText="color:"+(histN>0?C.muted:C.amber)+";margin-bottom:10px;font-size:12px;";
+      diag.textContent=histN>0?("Training history loaded: "+histN+" past sessions \u2014 previous weights will show where a match is found."):
+        "No training history yet. Deploy Apps Script v4 and tap \u201cSync programme\u201d \u2014 previous weights need it.";
+      container.appendChild(diag);
+    }
+
     var logInputs=[]; // {exercise, inputs:[4], doneEl}
     (day.exercises||[]).forEach(function(ex){
       var c=document.createElement("div");c.className="card";
@@ -1135,7 +1232,7 @@
   var PREVTAB=null;
   var RANGE="14"; // date filter for chart tabs: 7 | 14 | 30 | 90 | 180 | all | custom (default 14d)
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
-  var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"]];
+  var TABS=[["today","Today"],["history","History"],["training","Training"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"]];
 
   function render(savedFlash){
     var keepScroll=(typeof window!=="undefined"&&window.pageYOffset)?window.pageYOffset:0;
@@ -1320,6 +1417,7 @@
     else if(TAB==="history") buildHistory(body,fmodel);
     else if(TAB==="training") buildTraining(body,model);
     else if(TAB==="oura") buildOura(body,fmodel);
+    else if(TAB==="gymtrends") buildGymTrends(body);
     else if(TAB==="hp360") buildHP360(body,fmodel);
     else if(TAB==="insights") buildInsights(body,fmodel);
 
