@@ -395,10 +395,13 @@
     var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
     if(rowsB.length<2){needSync(container,"Import your 360HP CSV (and sync Oura) to see trends here.");return;}
 
-    lineChart(container,"HRV vs your rolling baseline","Daily HRV (360HP where available, else Oura) against your 7-day baseline.",labels,[
-      {label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.3},
-      {label:"baseline",data:rowsB.map(function(d){return r1(d.hBase);}),borderColor:C.muted,borderWidth:1,borderDash:[4,3],pointRadius:0,tension:0.3}
-    ],{},240);
+    // HRV as bars with the rolling baseline line over them
+    (function(){var cd=card("HRV vs your rolling baseline","Bars are daily HRV; the line is your 7-day rolling baseline. Bars under the line = a dip below your normal.");
+      var cv=mkCanvas(cd,240);container.appendChild(cd);
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"bar",label:"HRV",data:rowsB.map(function(d){return r1(d.hrv);}),backgroundColor:C.hrv+"66",borderColor:C.hrv,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"baseline",data:rowsB.map(function(d){return r1(d.hBase);}),borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({},LEG))}));})();
 
     var up=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase+d.hSd):null;});
     var lo=rowsB.map(function(d){return (d.hBase!=null&&d.hSd!=null)?r1(d.hBase-d.hSd):null;});
@@ -420,12 +423,26 @@
         {label:"score",data:rowsB.map(function(d){return d.score100;}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
       ]},options:baseOpts({scales:{y:{min:0,max:100}}})}));})();
 
-    // resting HR trend
+    // resting HR — bars with a dotted rolling-average line and a ±1SD variability band
     var hasRhr=rowsB.filter(function(d){return d.rhr!=null;}).length>=2;
-    if(hasRhr) lineChart(container,"Resting heart rate","Lower and stable is good; a jump often signals fatigue or illness coming on.",labels,[
-      {label:"resting HR",data:rowsB.map(function(d){return d.rhr;}),borderColor:C.red,borderWidth:2.2,pointRadius:0,tension:0.3},
-      {label:"baseline",data:rowsB.map(function(d){return r1(d.rBase);}),borderColor:C.muted,borderWidth:1,borderDash:[4,3],pointRadius:0,tension:0.3}
-    ],{});
+    if(hasRhr){
+      var rhrVals=rowsB.map(function(d){return d.rhr!=null?d.rhr:null;});
+      // 7-day rolling average + SD band from available values
+      var rAvg=[],rUp=[],rLo=[];
+      for(var ri=0;ri<rhrVals.length;ri++){
+        var w=[];for(var rk=Math.max(0,ri-6);rk<=ri;rk++){if(rhrVals[rk]!=null)w.push(rhrVals[rk]);}
+        if(w.length){var m=mean(w),sd=w.length>1?stdev(w):0;rAvg.push(r1(m));rUp.push(r1(m+sd));rLo.push(r1(m-sd));}
+        else{rAvg.push(null);rUp.push(null);rLo.push(null);}
+      }
+      var cdR=card("Resting heart rate","Bars are daily resting HR. Dotted line is your 7-day average; the shaded band is your normal swing (\u00b11 SD). A jump above the band can signal fatigue or illness.");
+      var cvR=mkCanvas(cdR,230);container.appendChild(cdR);
+      CHARTS.push(new Chart(cvR,{data:{labels:labels,datasets:[
+        {type:"line",label:"upper",data:rUp,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:"+1",order:3},
+        {type:"line",label:"lower",data:rLo,borderColor:"transparent",backgroundColor:"rgba(255,107,107,0.10)",pointRadius:0,fill:false,order:3},
+        {type:"bar",label:"resting HR",data:rhrVals,backgroundColor:C.red+"55",borderColor:C.red,borderWidth:1,borderRadius:3,order:2},
+        {type:"line",label:"7-day avg",data:rAvg,borderColor:C.amber,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({},LEG))}));
+    }
   }
 
   function buildCompare(container,model){
@@ -528,10 +545,13 @@
     var pts=model.filter(function(d){return d.hp_sleep!=null&&d.hrv!=null;}).map(function(d){return {x:d.hp_sleep,y:r1(d.hrv)};});
     if(pts.length>=4){
       var r=pearson(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
-      var cd=card("Does 360HP sleep predict your HRV?", r!=null?("Sleep score (x) vs HRV (y). r = "+r.toFixed(2)+"."):"Sleep vs HRV.");
+      var cd=card("Does 360HP sleep predict your HRV?", r!=null?("Sleep score (x, 1\u20134) vs HRV (y). r = "+r.toFixed(2)+"."):"Sleep vs HRV.");
       var cv=mkCanvas(cd,240);container.appendChild(cd);
-      CHARTS.push(new Chart(cv,{type:"scatter",data:{datasets:[{label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}]},
-        options:baseOpts({scales:{x:{min:0.5,max:4.5,ticks:{stepSize:1},title:{display:true,text:"sleep score",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
+      var ds=[{type:"scatter",label:"day",data:pts,backgroundColor:C.glow,pointRadius:4}];
+      var fit=linreg(pts.map(function(p){return p.x;}),pts.map(function(p){return p.y;}));
+      if(fit){ds.push({type:"line",label:"best fit",data:[{x:1,y:r1(fit.m*1+fit.b)},{x:4,y:r1(fit.m*4+fit.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
+      CHARTS.push(new Chart(cv,{data:{datasets:ds},
+        options:baseOpts({scales:{x:{type:"linear",min:1,max:4,ticks:{stepSize:1,precision:0},title:{display:true,text:"sleep score (1\u20134)",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
     }
 
     // ---- Option D: rolling sleep vs rolling HRV scatter, dots shaded by time + best fit ----
@@ -609,8 +629,12 @@
       var r2=pearson(pairs.map(function(p){return p.x;}),pairs.map(function(p){return p.y;}));
       var cd2=card("Last night's Oura sleep vs today's HRV", r2!=null?("Does a good night lift next-day HRV? r = "+r2.toFixed(2)+"."):"");
       var cv2=mkCanvas(cd2,240);container.appendChild(cd2);
-      CHARTS.push(new Chart(cv2,{type:"scatter",data:{datasets:[{label:"day",data:pairs,backgroundColor:C.oura,pointRadius:4}]},
-        options:baseOpts({scales:{x:{title:{display:true,text:"prev-night sleep",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
+      var ds2=[{type:"scatter",label:"day",data:pairs,backgroundColor:C.oura,pointRadius:4}];
+      var fit2=linreg(pairs.map(function(p){return p.x;}),pairs.map(function(p){return p.y;}));
+      if(fit2){var xs2=pairs.map(function(p){return p.x;});var x2min=Math.min.apply(null,xs2),x2max=Math.max.apply(null,xs2);
+        ds2.push({type:"line",label:"best fit",data:[{x:x2min,y:r1(fit2.m*x2min+fit2.b)},{x:x2max,y:r1(fit2.m*x2max+fit2.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
+      CHARTS.push(new Chart(cv2,{data:{datasets:ds2},
+        options:baseOpts({scales:{x:{type:"linear",title:{display:true,text:"prev-night sleep",color:C.muted}},y:{title:{display:true,text:"HRV",color:C.muted}}}})}));
     }
 
     // what predicts good vs bad days: compare avg metrics on green vs red days
@@ -757,6 +781,30 @@
 
   // ---------- Training tab (gym sheet) ----------
   var gymStatus={state:"idle",msg:""};
+  // find the most recent prior logged session for an exercise, fuzzy-matched by name
+  function normEx(s){return (s||"").toLowerCase().replace(/[^a-z0-9 ]/g,"").replace(/\s+/g," ").trim();}
+  function findPrevLift(exName){
+    var hist=getJSON(K_LOGHIST,[]);
+    if(!hist.length) return null;
+    var target=normEx(exName);
+    if(!target) return null;
+    var tWords=target.split(" ").filter(function(w){return w.length>2;});
+    var matches=hist.filter(function(l){
+      var n=normEx(l.exercise);
+      if(!n) return false;
+      if(n===target) return true;                 // exact
+      if(n.indexOf(target)>=0||target.indexOf(n)>=0) return true; // one contains the other
+      // word overlap: at least half of the meaningful words shared
+      var nWords=n.split(" ");
+      var shared=tWords.filter(function(w){return nWords.indexOf(w)>=0;}).length;
+      return tWords.length>0 && shared/tWords.length>=0.5;
+    });
+    if(!matches.length) return null;
+    // most recent by date then timestamp
+    matches.sort(function(a,b){ if(a.date!==b.date) return a.date<b.date?1:-1; return (b.ts||0)-(a.ts||0); });
+    return matches[0];
+  }
+
   function buildTraining(container,model){
     var gym=getJSON(K_GYM,null);
     var today=model.length?model[model.length-1]:null;
@@ -844,9 +892,11 @@
         (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'')+
         (ex.last?'<div class="ssrc" style="color:'+C.muted+';margin-bottom:8px">Last time: '+ex.last+'</div>':'');
       // 4 sets, each with a weight input and a velocity input beneath it
+      var prev=findPrevLift(ex.name); // most recent prior session for this exercise (fuzzy)
       var grid=document.createElement("div");grid.style.cssText="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;";
       var inputs=[]; var vels=[];
       var inpCss="padding:9px 6px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;text-align:center;width:100%;";
+      var prevCss="padding:5px 4px;border-radius:6px;background:"+C.panel+";border:1px dashed "+C.line+";color:"+C.muted+";font-size:12px;text-align:center;width:100%;font-variant-numeric:tabular-nums;";
       for(var s=0;s<4;s++){
         var col=document.createElement("div");col.style.cssText="display:flex;flex-direction:column;gap:5px;";
         var slab=document.createElement("div");slab.style.cssText="font-size:10px;color:"+C.muted+";text-align:center;letter-spacing:0.04em;";slab.textContent="Set "+(s+1);
@@ -854,11 +904,18 @@
         inp.value=(ex.vals&&ex.vals[s])?ex.vals[s]:"";inp.style.cssText=inpCss;
         var vel=document.createElement("input");vel.type="text";vel.inputMode="decimal";vel.placeholder="m/s";
         vel.style.cssText=inpCss+"border-color:"+C.glow+"44;";
-        col.appendChild(slab);col.appendChild(inp);col.appendChild(vel);
+        // previous-time read-only cells (weight then velocity) for this set
+        var pw=(prev&&prev.weights&&prev.weights[s])?prev.weights[s]:"";
+        var pvArr=(prev&&prev.vels)?prev.vels:null;
+        var pv=(pvArr&&pvArr[s])?pvArr[s]:"";
+        var pwCell=document.createElement("div");pwCell.style.cssText=prevCss;pwCell.textContent=pw!==""&&pw!=0?("prev "+pw):"prev \u2013";
+        var pvCell=document.createElement("div");pvCell.style.cssText=prevCss+"color:"+C.glow+"99;";pvCell.textContent=pv!==""&&pv!=0?("prev "+pv):"prev \u2013";
+        col.appendChild(slab);col.appendChild(inp);col.appendChild(pwCell);col.appendChild(vel);col.appendChild(pvCell);
         grid.appendChild(col);inputs.push(inp);vels.push(vel);
       }
       c.appendChild(grid);
-      var vhint=document.createElement("div");vhint.className="ssrc";vhint.style.cssText="color:"+C.muted+";margin-top:6px;";vhint.textContent="Top row = weight (kg) \u00b7 bottom row = bar velocity (m/s)";
+      var prevNote=prev?("Prev cells = your last logged "+ex.name+(normEx(prev.exercise)!==normEx(ex.name)?" (matched \u201c"+prev.exercise+"\u201d)":"")+" on "+prev.date+"."):"No previous log found for this exercise yet.";
+      var vhint=document.createElement("div");vhint.className="ssrc";vhint.style.cssText="color:"+C.muted+";margin-top:6px;line-height:1.4;";vhint.textContent="Weight (kg) / velocity (m/s), with your previous values beneath each. "+prevNote;
       c.appendChild(vhint);
 
       // Done checkbox
@@ -905,10 +962,12 @@
           rows.forEach(function(r){
             // volume = sum of (weight values entered); a simple load proxy per exercise
             var weights=[r.v1,r.v2,r.v3,r.v4].map(function(x){return parseFloat(x)||0;});
+            var velsPerSet=[r.vel1,r.vel2,r.vel3,r.vel4].map(function(x){return (x!=null&&x!=="")?x:"";});
             var vols=weights.filter(function(x){return x>0;});
             var vel=[r.vel1,r.vel2,r.vel3,r.vel4].map(function(x){return parseFloat(x)||0;}).filter(function(x){return x>0;});
             hist.push({date:logDate,week:r.week,day:r.day,exercise:r.exercise,
-              weights:weights, avgVel: vel.length?(vel.reduce(function(a,b){return a+b;},0)/vel.length):null,
+              weights:[r.v1||"",r.v2||"",r.v3||"",r.v4||""], vels:velsPerSet,
+              avgVel: vel.length?(vel.reduce(function(a,b){return a+b;},0)/vel.length):null,
               topWeight: vols.length?Math.max.apply(null,vols):null, ts:Date.now()});
           });
           // keep it from growing unbounded — last ~400 exercise-logs
@@ -929,7 +988,7 @@
   var TAB="today";
   var TABSCROLL=0;
   var PREVTAB=null;
-  var RANGE="all"; // date filter for chart tabs: 30 | 90 | 180 | all | custom
+  var RANGE="14"; // date filter for chart tabs: 7 | 14 | 30 | 90 | 180 | all | custom (default 14d)
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
   var TABS=[["today","Today"],["history","History"],["training","Training"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["insights","Insights"]];
 
@@ -1006,12 +1065,14 @@
     var rangeTabs={trends:1,compare:1,oura:1,insights:1,history:1};
     var fmodel=model;
     if(rangeTabs[TAB]){
-      // preset buttons
-      var rsel=document.createElement("div");rsel.style.cssText="display:flex;gap:6px;overflow-x:auto;margin-bottom:10px;scrollbar-width:none;";
-      var opts=[["30","30 days"],["90","90 days"],["180","6 months"],["all","All"]];
-      opts.forEach(function(o){var b=document.createElement("button");
-        b.className="btn "+(RANGE===o[0]?"btn-primary":"btn-ghost");b.style.cssText="padding:7px 14px;font-size:13px;white-space:nowrap;flex:0 0 auto;";
-        b.textContent=o[1];b.onclick=function(){RANGE=o[0];RFROM="";RTO="";render(false);};rsel.appendChild(b);});
+      // preset dropdown
+      var rsel=document.createElement("div");rsel.style.cssText="display:flex;gap:8px;align-items:center;margin-bottom:10px;";
+      var rlab=document.createElement("span");rlab.style.cssText="font-size:12px;color:"+C.muted+";";rlab.textContent="Show";
+      var opts=[["7","7 days"],["14","14 days"],["30","30 days"],["90","90 days"],["180","6 months"],["all","All"]];
+      var rdd=document.createElement("select");rdd.style.cssText="flex:1;padding:9px 11px;border-radius:8px;border:1px solid "+(RANGE!=="custom"?C.glow+"66":C.line)+";background:"+C.panel2+";color:"+C.ink+";font-size:14px;";
+      opts.forEach(function(o){var op=document.createElement("option");op.value=o[0];op.textContent=o[1];if(RANGE===o[0])op.selected=true;rdd.appendChild(op);});
+      rdd.onchange=function(){RANGE=rdd.value;RFROM="";RTO="";render(false);};
+      rsel.appendChild(rlab);rsel.appendChild(rdd);
       body.appendChild(rsel);
 
       // custom calendar range (From / To)
