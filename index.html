@@ -142,6 +142,27 @@
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
   var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
   var K_TOURN="readiness_tournament_v1", K_LOGHIST="readiness_loghist_v1", K_TRAVEL="readiness_travel_v1";
+  var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
+  var K_NOTES="readiness_notes_v1";       // per-date free-text notes
+  // per-day flags: {tourn:bool, travel:""|"short"|"long"}
+  function getFlags(iso){ var fh=getJSON(K_FLAGHIST,{}); return fh[iso]||{}; }
+  function setFlag(iso,kind,val){
+    try{
+      var fh=getJSON(K_FLAGHIST,{});
+      fh[iso]=fh[iso]||{};
+      if(val===false||val===""||val==null) delete fh[iso][kind]; else fh[iso][kind]=val;
+      if(!fh[iso].tourn && !fh[iso].travel) delete fh[iso];
+      setJSON(K_FLAGHIST,fh);
+    }catch(e){}
+  }
+  function getNote(iso){ var n=getJSON(K_NOTES,{}); return n[iso]||""; }
+  function setNote(iso,txt){
+    try{
+      var n=getJSON(K_NOTES,{});
+      if(txt&&txt.trim()) n[iso]=txt.trim(); else delete n[iso];
+      setJSON(K_NOTES,n);
+    }catch(e){}
+  }
 
   function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
   function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
@@ -313,6 +334,16 @@
         } else confidence="moderate";
       }
 
+      // ---- travel: a flight YESTERDAY is recorded as CONTEXT only ----
+      // Deliberately does NOT move the score — HRV, resting HR and subjective already
+      // capture a flight's real cost. Penalising on top would double-count it.
+      // The flag exists so a dip can be explained, not pre-judged.
+      var prevIso=(function(){ var d=new Date(row.iso+"T00:00:00"); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
+      var travel=(getFlags(prevIso).travel)||"";
+      if(travel){
+        reasons.push({dir:"flat", txt:(travel==="long"?"Long-haul":"Short-haul")+" flight yesterday \u2014 context for today's numbers (not scored)"});
+      }
+
       var band=comp>=0.15?"green":(comp>=-0.2?"yellow":"red");
       var hasAnchor=(hBase!==null && hrv!=null);
 
@@ -322,7 +353,8 @@
 
       return Object.assign({},row,{hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
         rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,comp:comp,score100:score100,band:band,
-        reasons:reasons,confidence:confidence,tempFlag:tempFlag,has:hasAnchor});
+        reasons:reasons,confidence:confidence,tempFlag:tempFlag,has:hasAnchor,travel:travel,
+        tourn:!!getFlags(row.iso).tourn, appNote:getNote(row.iso)});
     });
   }
 
@@ -908,6 +940,47 @@
         if(d.confidence) bits.push("confidence: "+d.confidence);
         extra.textContent=bits.join("  \u00b7  ");
         exp.appendChild(extra);
+
+        // ---- per-day editing: tournament, travel (short/long), notes ----
+        var edWrap=document.createElement("div");edWrap.style.cssText="margin-top:12px;padding-top:10px;border-top:1px solid "+C.line+";";
+        edWrap.onclick=function(ev){ ev.stopPropagation(); }; // don't collapse the row while editing
+        var dFlags=getFlags(d.iso);
+
+        // tournament toggle
+        var tRow=document.createElement("div");tRow.style.cssText="display:flex;gap:6px;align-items:center;margin-bottom:8px;";
+        var tBtn=document.createElement("button");
+        tBtn.className="btn "+(dFlags.tourn?"btn-primary":"btn-ghost");
+        tBtn.style.cssText="padding:6px 12px;font-size:12px;";
+        tBtn.textContent=dFlags.tourn?"\ud83c\udfcc\ufe0f Tournament day":"Tournament day";
+        tBtn.onclick=function(ev){ ev.stopPropagation(); setFlag(d.iso,"tourn",!dFlags.tourn); render(false); };
+        tRow.appendChild(tBtn);
+        edWrap.appendChild(tRow);
+
+        // travel: none / short / long
+        var vRow=document.createElement("div");vRow.style.cssText="display:flex;gap:6px;margin-bottom:8px;";
+        var vLab=document.createElement("span");vLab.style.cssText="font-size:11px;color:"+C.muted+";align-self:center;margin-right:2px;white-space:nowrap;";vLab.textContent="Flew this day";
+        vRow.appendChild(vLab);
+        [["","None"],["short","Short"],["long","Long"]].forEach(function(o){
+          var b=document.createElement("button");
+          b.className="btn "+((dFlags.travel||"")===o[0]?"btn-primary":"btn-ghost");
+          b.style.cssText="padding:6px 10px;font-size:12px;flex:1;";
+          b.textContent=o[1];
+          b.onclick=function(ev){ ev.stopPropagation(); setFlag(d.iso,"travel",o[0]||false); render(false); };
+          vRow.appendChild(b);
+        });
+        edWrap.appendChild(vRow);
+
+        // note
+        var nTa=document.createElement("textarea");
+        nTa.value=getNote(d.iso);
+        nTa.placeholder="Add a note for this day\u2026";
+        nTa.style.cssText="width:100%;min-height:58px;background:"+C.panel2+";color:"+C.ink+";border:1px solid "+C.line+";border-radius:8px;padding:8px;font-size:13px;font-family:inherit;resize:vertical;";
+        nTa.onclick=function(ev){ ev.stopPropagation(); };
+        var nBtn=document.createElement("button");nBtn.className="btn btn-ghost";nBtn.style.cssText="padding:6px 14px;font-size:12px;margin-top:6px;";nBtn.textContent="Save note";
+        nBtn.onclick=function(ev){ ev.stopPropagation(); setNote(d.iso,nTa.value); nBtn.textContent="Saved \u2713"; };
+        edWrap.appendChild(nTa);edWrap.appendChild(nBtn);
+
+        exp.appendChild(edWrap);
         container.appendChild(exp);
       }
     });
@@ -1224,6 +1297,99 @@
     saveWrap.appendChild(saveBtn);container.appendChild(saveWrap);
   }
 
+  // ---- export the data that ONLY exists in this app ----
+  function exportMyData(model){
+    try{
+      var flags=getJSON(K_FLAGHIST,{});
+      var loghist=getJSON(K_LOGHIST,[]);
+      var esc=function(v){ if(v==null) return ""; var s=String(v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
+
+      // Sheet 1: one row per day — the composite score + flags + the inputs behind it
+      var lines=[];
+      lines.push("READINESS EXPORT," + new Date().toISOString().slice(0,10));
+      lines.push("");
+      lines.push("DAILY SCORES AND FLAGS");
+      lines.push(["date","readiness_score_0_100","band","confidence","tournament_day","travel",
+                  "note","hrv_used","hrv_source","hrv_baseline","resting_hr","subjective_360hp","objective_360hp",
+                  "oura_readiness","oura_sleep_score","temp_deviation","why"].join(","));
+      (model||[]).filter(function(d){return d.has;}).forEach(function(d){
+        var f=flags[d.iso]||{};
+        var why=(d.reasons||[]).map(function(r){return (r&&r.txt)?r.txt:String(r);}).join(" | ");
+        lines.push([
+          d.iso, d.score100, d.band, d.confidence,
+          f.tourn?"yes":"", f.travel||"",
+          esc(getNote(d.iso)),
+          d.hrv!=null?r1(d.hrv):"", d.hrvSrc||"", d.hBase!=null?r1(d.hBase):"",
+          d.rhr!=null?d.rhr:"", d.hp_subjective!=null?d.hp_subjective:"", d.hp_objective!=null?d.hp_objective:"",
+          d.o_readiness!=null?d.o_readiness:"", d.o_sleepscore!=null?d.o_sleepscore:"",
+          d.o_tempdev!=null?r1(d.o_tempdev):"", esc(why)
+        ].join(","));
+      });
+
+      // Sheet 2: sessions logged through the app — includes velocities (not in the sheet)
+      lines.push("");
+      lines.push("SESSIONS LOGGED IN APP (includes bar velocities \u2014 these exist nowhere else)");
+      lines.push(["date","week","day","exercise","set1","set2","set3","set4","vel1","vel2","vel3","vel4","avg_velocity","top_weight"].join(","));
+      loghist.forEach(function(l){
+        var w=l.weights||[], v=l.vels||[];
+        lines.push([esc(l.date),esc(l.week),esc(l.day),esc(l.exercise),
+          esc(w[0]),esc(w[1]),esc(w[2]),esc(w[3]),
+          esc(v[0]),esc(v[1]),esc(v[2]),esc(v[3]),
+          l.avgVel!=null?r2(l.avgVel):"", l.topWeight!=null?l.topWeight:""].join(","));
+      });
+
+      // Sheet 3: raw flag history (every day you toggled tournament/travel)
+      lines.push("");
+      lines.push("TOURNAMENT / TRAVEL / NOTES BY DAY");
+      lines.push(["date","tournament","travel","note"].join(","));
+      var notesAll=getJSON(K_NOTES,{});
+      var allDays={};
+      Object.keys(flags).forEach(function(k){allDays[k]=1;});
+      Object.keys(notesAll).forEach(function(k){allDays[k]=1;});
+      Object.keys(allDays).sort().forEach(function(k){
+        var f=flags[k]||{};
+        lines.push([k, f.tourn?"yes":"", f.travel||"", esc(notesAll[k]||"")].join(","));
+      });
+
+      var csv=lines.join("\n");
+      var stamp=new Date().toISOString().slice(0,10);
+      var name="readiness-export-"+stamp+".csv";
+
+      // try a real file download first
+      var blob=new Blob([csv],{type:"text/csv;charset=utf-8;"});
+      var url=URL.createObjectURL(blob);
+      var a=document.createElement("a");
+      a.href=url; a.download=name;
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(url); if(a.parentNode)a.parentNode.removeChild(a); },1500);
+
+      // also show it on screen so it can be copied if the download is awkward on iOS
+      showExportText(csv,name);
+    }catch(e){
+      alert("Export failed: "+e.message);
+    }
+  }
+
+  // fallback view — selectable text you can copy/share if the file download doesn't stick on iOS
+  function showExportText(csv,name){
+    var ov=document.createElement("div");
+    ov.style.cssText="position:fixed;inset:0;background:"+C.bg+"F2;z-index:9999;padding:16px;overflow:auto;-webkit-overflow-scrolling:touch;";
+    var h=document.createElement("div");h.style.cssText="color:"+C.ink+";font-weight:700;font-size:16px;margin-bottom:6px;";h.textContent="Your data export";
+    var sub=document.createElement("div");sub.className="cnote";sub.style.cssText="color:"+C.muted+";margin-bottom:10px;";
+    sub.textContent="Saved as "+name+" if your browser allowed the download. Otherwise: tap and hold below, Select All, Copy \u2014 then paste into Notes or an email to yourself.";
+    var ta=document.createElement("textarea");
+    ta.value=csv;
+    ta.style.cssText="width:100%;height:52vh;background:"+C.panel2+";color:"+C.ink+";border:1px solid "+C.line+";border-radius:10px;padding:10px;font-size:12px;font-family:ui-monospace,Menlo,monospace;";
+    var row=document.createElement("div");row.className="btnrow";row.style.marginTop="10px";
+    var cp=document.createElement("button");cp.className="btn btn-primary";cp.textContent="Copy all";
+    cp.onclick=function(){ try{ ta.select(); document.execCommand("copy"); cp.textContent="Copied \u2713"; }catch(e){ cp.textContent="Select manually"; } };
+    var cl=document.createElement("button");cl.className="btn btn-ghost";cl.textContent="Close";
+    cl.onclick=function(){ if(ov.parentNode) ov.parentNode.removeChild(ov); };
+    row.appendChild(cp);row.appendChild(cl);
+    ov.appendChild(h);ov.appendChild(sub);ov.appendChild(ta);ov.appendChild(row);
+    document.body.appendChild(ov);
+  }
+
   // ---------- app render ----------
   var app=document.getElementById("app");
   var ouraStatus={state:"idle",msg:""};
@@ -1359,9 +1525,11 @@
       if(today.roll7!=null&&today.roll30!=null){
         var dir=today.roll7>=today.roll30; trendBits.push("<span style='color:"+(dir?C.green:C.amber)+"'>"+(dir?"\u25b2 trend climbing":"\u25bc trend sliding")+"</span>"); }
       var trendLine=trendBits.length?'<div style="font-size:12.5px;color:'+C.muted+';margin-top:10px;font-weight:600">'+trendBits.join("  \u00b7  ")+'</div>':'';
-      // tournament mode reshapes the guidance toward freshness
-      var tournOn=get(K_TOURN)==="1";
-      var travelOn=get(K_TRAVEL)==="1";
+      // tournament is today's flag; travel is YESTERDAY's (a flight hits the next morning)
+      var todayFlags=getFlags(today.iso);
+      var tournOn=!!todayFlags.tourn;
+      var travelMode=today.travel||"";
+      var travelOn=!!travelMode;
       var bodyText=VERD[today.band].b;
       if(tournOn){
         if(today.band==="green") bodyText="Tournament week: you're fresh. Keep it that way \u2014 sharpen, don't grind. Save the tank for the course.";
@@ -1373,20 +1541,47 @@
         '<div class="scoreside"><div class="vword" style="color:'+bc+'">'+VERD[today.band].w+'</div><div class="vhead">'+(tournOn?"\ud83c\udfcc\ufe0f "+VERD[today.band].h:VERD[today.band].h)+'</div></div>'+
         '</div>'+
         trendLine+
-        (travelOn?'<div style="font-size:12px;color:'+C.amber+';margin-top:8px;font-weight:600">\u2708\ufe0f Travel flagged \u2014 a dip today is likely jet lag, not a red flag; don\'t over-read it.</div>':'')+
+        (travelOn?'<div style="font-size:12px;color:'+C.amber+';margin-top:8px;font-weight:600">\u2708\ufe0f '+(travelMode==="long"?"Long-haul flight yesterday \u2014 worth bearing in mind when you read today\'s numbers.":"Short-haul flight yesterday \u2014 context for today\'s numbers.")+'</div>':'')+
         '<p class="vbody">'+bodyText+'</p>'+
         '<span class="conf" style="background:'+confColor+'22;color:'+confColor+'">Confidence: '+today.confidence+'</span>';
       body.appendChild(v);
 
-      // Tournament + travel toggles
+      // Tournament (today) + travel (yesterday — a flight shows up in this morning's reading)
+      var todayIso=today.iso;
+      var yestIso=(function(){ var d=new Date(todayIso+"T00:00:00"); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
       var tog=document.createElement("div");tog.className="btnrow";
       var tb=document.createElement("button");tb.className="btn "+(tournOn?"btn-primary":"btn-ghost");
-      tb.textContent=(tournOn?"\ud83c\udfcc\ufe0f Tournament mode: ON":"Tournament mode");
-      tb.onclick=function(){ set(K_TOURN,tournOn?"0":"1"); render(false); };
-      var vb=document.createElement("button");vb.className="btn "+(travelOn?"btn-primary":"btn-ghost");
-      vb.textContent=(travelOn?"\u2708\ufe0f Travel day: ON":"Travel day");
-      vb.onclick=function(){ set(K_TRAVEL,travelOn?"0":"1"); render(false); };
-      tog.appendChild(tb);tog.appendChild(vb);body.appendChild(tog);
+      tb.textContent=(tournOn?"\ud83c\udfcc\ufe0f Tournament day: ON":"Tournament day");
+      tb.onclick=function(){ var nv=!tournOn; setFlag(todayIso,"tourn",nv?true:false); render(false); };
+      tog.appendChild(tb);body.appendChild(tog);
+
+      // travel YESTERDAY: none / short haul / long haul
+      var trow=document.createElement("div");trow.style.cssText="display:flex;gap:6px;margin-top:8px;";
+      var tLab=document.createElement("span");tLab.style.cssText="font-size:12px;color:"+C.muted+";align-self:center;margin-right:2px;white-space:nowrap;";tLab.textContent="Flew yesterday";
+      trow.appendChild(tLab);
+      [["","No"],["short","\u2708\ufe0f Short"],["long","\u2708\ufe0f Long"]].forEach(function(o){
+        var b=document.createElement("button");
+        b.className="btn "+((travelMode||"")===o[0]?"btn-primary":"btn-ghost");
+        b.style.cssText="padding:7px 12px;font-size:12.5px;flex:1;";
+        b.textContent=o[1];
+        b.onclick=function(){ setFlag(yestIso,"travel",o[0]||false); render(false); };
+        trow.appendChild(b);
+      });
+      body.appendChild(trow);
+
+      // free-text note for today
+      var nWrap=document.createElement("div");nWrap.className="card";nWrap.style.marginTop="12px";
+      var nLab=document.createElement("div");nLab.style.cssText="font-size:12px;color:"+C.muted+";margin-bottom:6px;";nLab.textContent="Notes for today";
+      var nTa=document.createElement("textarea");
+      nTa.value=getNote(todayIso);
+      nTa.placeholder="Anything worth remembering \u2014 how you felt, what you did, sleep, travel, niggles\u2026";
+      nTa.style.cssText="width:100%;min-height:74px;background:"+C.panel2+";color:"+C.ink+";border:1px solid "+C.line+";border-radius:10px;padding:10px;font-size:14px;font-family:inherit;resize:vertical;";
+      var nRow=document.createElement("div");nRow.className="btnrow";nRow.style.marginTop="8px";
+      var nSave=document.createElement("button");nSave.className="btn btn-primary";nSave.style.cssText="padding:8px 16px;font-size:13px;";nSave.textContent="Save note";
+      nSave.onclick=function(){ setNote(todayIso,nTa.value); nSave.textContent="Saved \u2713"; };
+      nRow.appendChild(nSave);
+      nWrap.appendChild(nLab);nWrap.appendChild(nTa);nWrap.appendChild(nRow);
+      body.appendChild(nWrap);
 
       var rc=document.createElement("div");rc.className="reason";rc.innerHTML='<h3>Why this signal</h3>';
       if(today.reasons.length){ today.reasons.forEach(function(r){
@@ -1409,8 +1604,12 @@
 
       var btns=document.createElement("div");btns.className="btnrow";
       var b1=document.createElement("button");b1.className="btn btn-primary";b1.textContent="Update 360HP CSV";b1.onclick=function(){fileInput.click();};
+      var bx=document.createElement("button");bx.className="btn btn-ghost";bx.textContent="Export my data";bx.onclick=function(){exportMyData(model);};
       var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){localStorage.removeItem(K_ROWS);localStorage.removeItem(K_OURA);localStorage.removeItem(K_OURATIME);render(false);}};
-      btns.appendChild(b1);btns.appendChild(b2);body.appendChild(btns);
+      btns.appendChild(b1);btns.appendChild(bx);btns.appendChild(b2);body.appendChild(btns);
+      var xnote=document.createElement("div");xnote.className="cnote";xnote.style.cssText="text-align:center;margin-top:-4px;color:"+C.muted+";";
+      xnote.textContent="Export saves the parts that only exist in this app \u2014 your readiness scores, tournament/travel flags and bar velocities.";
+      body.appendChild(xnote);
     }
     else if(TAB==="trends") buildTrends(body,fmodel);
     else if(TAB==="compare") buildCompare(body,fmodel);
