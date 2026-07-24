@@ -260,36 +260,105 @@
       var roll7=w7.length>=3?mean(w7):null, roll30=w30.length>=5?mean(w30):null;
 
       // ---- component sub-scores (-1 bad .. +1 good) ----
+      // Each component is normalised against YOUR OWN variability (a z-score) rather than a
+      // fixed percentage, so "a meaningful drop" means meaningful *for you*. This is the
+      // approach used in HRV-guided training research (deviation vs personal SD, not absolutes).
       var reasons=[];
       var parts=[], weights=[];
 
+      // HRV vs personal baseline, scaled by personal SD (z-score, capped at ±2 SD)
       if(hDev!==null){
-        var hScore=Math.max(-1,Math.min(1,hDev/0.15));
-        parts.push(hScore); weights.push(0.45);
+        var hScore;
+        var zH=null;
+        if(hSd&&hSd>0){
+          zH=(hrv-hBase)/hSd;                    // how many of YOUR SDs from YOUR normal
+          hScore=Math.max(-1,Math.min(1,zH/1.5)); // 1.5 SD = full deflection
+        } else {
+          hScore=Math.max(-1,Math.min(1,hDev/0.15)); // fallback if SD not yet available
+        }
+        parts.push(hScore); weights.push(0.40);
         var pct=Math.round(hDev*100);
+        var hWord=zH==null?"":(Math.abs(zH)<0.5?"in your normal range":
+                    zH<=-1.5?"well below your normal range":
+                    zH<=-1?"below your normal range":
+                    zH>=1.5?"well above your normal range":
+                    zH>=1?"above your normal range":
+                    zH<0?"slightly below normal":"slightly above normal");
         reasons.push({dir:hScore>0.15?"up":hScore<-0.15?"down":"flat",
-          txt:"HRV "+(pct>=0?"+":"")+pct+"% vs baseline"+(hrvSrc?" ("+hrvSrc+")":"")});
+          txt:"HRV "+Math.round(hrv)+" ms \u2014 "+(pct>=0?"+":"")+pct+"% vs your 7-day normal of "+Math.round(hBase)+" ms"+(hWord?", "+hWord:"")+(hrvSrc?" ("+hrvSrc+")":"")});
       }
+
+      // Acute:chronic HRV — 7-day vs 30-day. The stronger accumulating-fatigue signal.
+      if(roll7!=null&&roll30!=null&&roll30>0){
+        var acwr=roll7/roll30;
+        var aScore=Math.max(-1,Math.min(1,(acwr-1)/0.08));
+        parts.push(aScore); weights.push(0.12);
+        var aPct=Math.round((acwr-1)*100);
+        if(Math.abs(aPct)>=3){
+          reasons.push({dir:aScore>0.2?"up":aScore<-0.2?"down":"flat",
+            txt:"Your last 7 days average "+(aPct>=0?"+":"")+aPct+"% "+(aPct>=0?"above":"below")+" your last 30 \u2014 "+
+                (aPct<=-5?"fatigue building up over time":aPct>=5?"trending fresher than usual":"steady over time")});
+        }
+      }
+
+      // Subjective, anchored to YOUR personal average rather than a fixed 7.5
       if(row.hp_subjective!=null){
-        var sScore=Math.max(-1,Math.min(1,(row.hp_subjective-7.5)/2));
-        parts.push(sScore); weights.push(0.28);
-        reasons.push({dir:sScore>0.2?"up":sScore<-0.2?"down":"flat", txt:"Subjective "+row.hp_subjective+"/10 (360HP)"});
+        var sp=prior.map(function(d){return d.hp_subjective;}).filter(function(v){return v!=null&&isFinite(v);});
+        var sBase=sp.length>=3?mean(sp):7.5;
+        var sSd=sp.length>=3?stdev(sp):null;
+        var sScore;
+        if(sSd&&sSd>0.3){ sScore=Math.max(-1,Math.min(1,(row.hp_subjective-sBase)/(1.5*sSd))); }
+        else { sScore=Math.max(-1,Math.min(1,(row.hp_subjective-sBase)/1.5)); }
+        parts.push(sScore); weights.push(0.26);
+        var sDiff=(row.hp_subjective-sBase);
+        reasons.push({dir:sScore>0.2?"up":sScore<-0.2?"down":"flat",
+          txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 your usual is about "+(Math.round(sBase*10)/10)+
+              (Math.abs(sDiff)<0.4?", so about normal":(sDiff>0?", so better than usual":", so worse than usual"))});
       }
+
+      // Resting HR vs personal baseline, scaled by personal SD
       if(rBase&&rhr!=null){
-        var rd=(rhr-rBase)/rBase; var rScore=Math.max(-1,Math.min(1,-rd/0.08));
+        var rSd=rp.length>=3?stdev(rp):null;
+        var rd=(rhr-rBase)/rBase;
+        var rScore;
+        if(rSd&&rSd>0.5){ rScore=Math.max(-1,Math.min(1,-(rhr-rBase)/(1.5*rSd))); }
+        else { rScore=Math.max(-1,Math.min(1,-rd/0.08)); }
         parts.push(rScore); weights.push(0.12);
         var rdiff=Math.round(rhr-rBase);
-        if(Math.abs(rdiff)>=2) reasons.push({dir:rScore>0?"up":"down", txt:"Resting HR "+(rdiff>0?"+":"")+rdiff+" bpm"+(rhrSrc?" ("+rhrSrc+")":"")});
+        if(Math.abs(rdiff)>=1){
+          reasons.push({dir:rScore>0.2?"up":rScore<-0.2?"down":"flat",
+            txt:"Resting HR "+Math.round(rhr)+" bpm \u2014 "+(rdiff>0?"+"+rdiff:rdiff)+" vs your 7-day normal of "+Math.round(rBase)+" bpm"+
+                (rdiff>=3?" (a rise usually means fatigue or something brewing)":rdiff<=-3?" (lower than usual \u2014 a good sign)":"")});
+        }
       }
+
+      // Sleep duration — strong independent predictor; judged against your own average
+      if(row.o_sleephrs!=null){
+        var slp=prior.map(function(d){return d.o_sleephrs;}).filter(function(v){return v!=null&&isFinite(v);});
+        var slBase=slp.length>=3?mean(slp):7.5;
+        var hScoreSleep=Math.max(-1,Math.min(1,(row.o_sleephrs-slBase)/1.2));
+        parts.push(hScoreSleep); weights.push(0.05);
+        var slDiff=row.o_sleephrs-slBase;
+        if(Math.abs(slDiff)>=0.6){
+          reasons.push({dir:hScoreSleep>0?"up":"down",
+            txt:"Slept "+(Math.round(row.o_sleephrs*10)/10)+" h \u2014 "+(slDiff>0?"+":"")+(Math.round(slDiff*10)/10)+" h vs your usual "+(Math.round(slBase*10)/10)+" h"});
+        }
+      }
+
       if(row.o_readiness!=null){
         var oScore=Math.max(-1,Math.min(1,(row.o_readiness-75)/15));
-        parts.push(oScore); weights.push(0.09);
-        reasons.push({dir:oScore>0.2?"up":oScore<-0.2?"down":"flat", txt:"Oura readiness "+row.o_readiness});
+        parts.push(oScore); weights.push(0.05);
+        if(row.o_readiness>=85||row.o_readiness<68){
+          reasons.push({dir:oScore>0.2?"up":oScore<-0.2?"down":"flat",
+            txt:"Oura scored your readiness "+row.o_readiness+"/100"+(row.o_readiness>=85?" \u2014 strong":" \u2014 low")});
+        }
       }
       if(row.o_sleepscore!=null){
         var slScore=Math.max(-1,Math.min(1,(row.o_sleepscore-75)/18));
-        parts.push(slScore); weights.push(0.06);
-        if(row.o_sleepscore<70||row.o_sleepscore>=88) reasons.push({dir:slScore>0?"up":"down", txt:"Oura sleep "+row.o_sleepscore});
+        parts.push(slScore); weights.push(0.05);
+        if(row.o_sleepscore<70||row.o_sleepscore>=88){
+          reasons.push({dir:slScore>0?"up":"down", txt:"Oura rated last night's sleep "+row.o_sleepscore+"/100"+(row.o_sleepscore<70?" (poor)":" (good)")});
+        }
       }
 
       // weighted composite
@@ -300,17 +369,17 @@
       var tempFlag=false;
       if(row.o_tempdev!=null && row.o_tempdev>=0.5){
         tempFlag=true; comp=Math.min(comp,comp-0.25);
-        reasons.push({dir:"warn", txt:"Body temp +"+row.o_tempdev.toFixed(1)+"°C above normal — possible illness/stress"});
+        reasons.push({dir:"warn", txt:"Body temp ran "+row.o_tempdev.toFixed(1)+"\u00b0C above your normal overnight \u2014 often the earliest sign of illness or heavy stress, so the score is pulled down"});
       }
 
       // ---- subjective override: a rough morning pulls toward caution on its own ----
       if(row.hp_subjective!=null){
         if(row.hp_subjective<=5){
           comp=Math.min(comp,-0.35);
-          reasons.push({dir:"warn", txt:"Subjective "+row.hp_subjective+"/10 is low — capped toward recover regardless of other signals"});
+          reasons.push({dir:"warn", txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 when you feel that rough, the score is held down no matter what the devices say"});
         } else if(row.hp_subjective<=6.5){
           comp=Math.min(comp,-0.05);
-          reasons.push({dir:"warn", txt:"Subjective "+row.hp_subjective+"/10 is down — held to moderate at best today"});
+          reasons.push({dir:"warn", txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 low enough that today is capped at moderate, whatever else looks good"});
         }
       }
 
@@ -318,7 +387,7 @@
       var text=((row.tags||"")+" "+(row.note||"")).toLowerCase();
       if(["pain","fatigue","ill","sick","injur","lock"].some(function(w){return text.indexOf(w)>=0;})){
         comp=Math.min(comp,-0.5);
-        reasons.push({dir:"warn", txt:"Flagged in notes: "+(row.tags||row.note)});
+        reasons.push({dir:"warn", txt:"You noted \u201c"+(row.tags||row.note)+"\u201d \u2014 pain or illness overrides the numbers and pushes today toward recovery"});
       }
 
       // ---- agreement / disagreement between 360HP HRV and Oura readiness ----
@@ -326,11 +395,11 @@
       if(hDev!==null && row.o_readiness!=null){
         var hpPos=hDev>0.03, hpNeg=hDev<-0.03;
         var ouPos=row.o_readiness>=78, ouNeg=row.o_readiness<70;
-        if((hpPos&&ouPos)||(hpNeg&&ouNeg)) confidence="high — sources agree";
+        if((hpPos&&ouPos)||(hpNeg&&ouNeg)) confidence="high \u2014 both devices agree";
         else if((hpPos&&ouNeg)||(hpNeg&&ouPos)){
-          confidence="mixed — sources disagree";
+          confidence="mixed \u2014 your two devices disagree";
           comp=comp>0?comp*0.5:comp*0.7; // pull toward neutral/caution on conflict
-          reasons.push({dir:"warn", txt:"360HP HRV and Oura disagree today — easing the call toward caution"});
+          reasons.push({dir:"warn", txt:"Your 360HP reading and Oura are telling different stories today \u2014 when they disagree the score is pulled toward the cautious side"});
         } else confidence="moderate";
       }
 
@@ -1521,9 +1590,9 @@
       // trend basis line — makes clear the score is relative to your rolling baseline, not one day
       var trendBits=[];
       if(today.hDev!=null){ var pct=Math.round(today.hDev*100);
-        trendBits.push("HRV "+(pct>=0?"+":"")+pct+"% vs your 7-day baseline"); }
+        trendBits.push("HRV "+(pct>=0?"+":"")+pct+"% vs your average of the last 7 days"); }
       if(today.roll7!=null&&today.roll30!=null){
-        var dir=today.roll7>=today.roll30; trendBits.push("<span style='color:"+(dir?C.green:C.amber)+"'>"+(dir?"\u25b2 trend climbing":"\u25bc trend sliding")+"</span>"); }
+        var dir=today.roll7>=today.roll30; trendBits.push("<span style='color:"+(dir?C.green:C.amber)+"'>"+(dir?"\u25b2 last week better than last month":"\u25bc last week below last month")+"</span>"); }
       var trendLine=trendBits.length?'<div style="font-size:12.5px;color:'+C.muted+';margin-top:10px;font-weight:600">'+trendBits.join("  \u00b7  ")+'</div>':'';
       // tournament is today's flag; travel is YESTERDAY's (a flight hits the next morning)
       var todayFlags=getFlags(today.iso);
@@ -1583,7 +1652,8 @@
       nWrap.appendChild(nLab);nWrap.appendChild(nTa);nWrap.appendChild(nRow);
       body.appendChild(nWrap);
 
-      var rc=document.createElement("div");rc.className="reason";rc.innerHTML='<h3>Why this signal</h3>';
+      var rc=document.createElement("div");rc.className="reason";
+      rc.innerHTML='<h3>Why this signal</h3><div style="font-size:12px;color:'+C.muted+';margin:-4px 0 10px;line-height:1.5">Everything is judged against <b>your own normal</b> \u2014 the average of your last 7 days \u2014 not against anyone else\u2019s numbers.</div>';
       if(today.reasons.length){ today.reasons.forEach(function(r){
         var cls=r.dir==="up"?"rup":r.dir==="down"?"rdown":r.dir==="warn"?"rwarn":"rflat";
         var ico=r.dir==="up"?"\u25b2":r.dir==="down"?"\u25bc":r.dir==="warn"?"\u26a0":"\u2022";
@@ -1594,8 +1664,8 @@
 
       var st=document.createElement("div");st.className="stats";
       function stat(l,val,sub,src,col){return '<div class="stat"><div class="slabel">'+l+'</div><div class="svalue" style="color:'+(col||C.ink)+'">'+val+'</div>'+(sub?'<div class="ssub">'+sub+'</div>':'')+(src?'<div class="ssrc">'+src+'</div>':'')+'</div>';}
-      st.innerHTML=stat("HRV",today.hrv!=null?today.hrv.toFixed(1):"\u2014",today.hBase?("base "+today.hBase.toFixed(0)):"",today.hrvSrc||"",C.hrv)+
-        stat("Resting HR",today.rhr!=null?today.rhr:"\u2014",today.rBase?("base "+today.rBase.toFixed(0)):"",today.hrvSrc==="360HP"&&today.hp_rhr!=null?"360HP":(today.o_rhr!=null?"Oura":""))+
+      st.innerHTML=stat("HRV",today.hrv!=null?today.hrv.toFixed(1):"\u2014",today.hBase?("your normal "+today.hBase.toFixed(0)):"",today.hrvSrc||"",C.hrv)+
+        stat("Resting HR",today.rhr!=null?today.rhr:"\u2014",today.rBase?("your normal "+today.rBase.toFixed(0)):"",today.hrvSrc==="360HP"&&today.hp_rhr!=null?"360HP":(today.o_rhr!=null?"Oura":""))+
         stat("Subjective",today.hp_subjective!=null?today.hp_subjective:"\u2014","/ 10",today.hp_subjective!=null?"360HP":"")+
         stat("Oura readiness",today.o_readiness!=null?today.o_readiness:"\u2014","/ 100",today.o_readiness!=null?"Oura":"")+
         stat("Oura sleep",today.o_sleepscore!=null?today.o_sleepscore:"\u2014","/ 100",today.o_sleepscore!=null?"Oura":"")+
