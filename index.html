@@ -790,7 +790,14 @@
     var engineDays = arr.map(toEngineDay);
     return arr.map(function(row,i){
       var hist = engineDays.slice(0,i);          // engine only looks at prior days
-      var res  = RV2.compute(engineDays[i], hist);
+      var res;
+      try {
+        res = RV2.compute(engineDays[i], hist);
+      } catch(err) {
+        // never let a single malformed day take down the whole render
+        res = { score:null, band:"yellow", comp:0, components:[], flags:[], why:[], confidence:{level:"low"} };
+      }
+      if(!res || typeof res!=="object") res = { score:null, band:"yellow", comp:0, components:[], flags:[], why:[], confidence:{level:"low"} };
 
       // pull component detail for the fields the UI still shows directly
       function comp(k){ for(var j=0;j<res.components.length;j++){ if(res.components[j].key===k) return res.components[j]; } return null; }
@@ -810,17 +817,103 @@
       var w30=arr.slice(Math.max(0,i-29),i+1).map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
       var roll7=w7.length>=3?mean(w7):null, roll30=w30.length>=5?mean(w30):null;
 
-      // adapt the engine's plain-language "why" list into the UI's {dir,txt} reasons
+      // Build plain-language, number-rich reasons from the engine's components +
+      // the raw values — v1's readability with v2's maths underneath.
       var reasons=[];
-      (res.flags||[]).forEach(function(f){ reasons.push({dir:"warn", txt:f.message}); });
-      (res.why||[]).forEach(function(t){
-        if(typeof t!=="string") return;
-        if(reasons.some(function(r){return r.txt===t;})) return;
-        var low=t.toLowerCase();
-        var dir = /below|down|short|irregular|disagree|illness|low|suppress|against|bouncing/.test(low) ? "down"
-                : /above|solid|good|strong|agree/.test(low) ? "up" : "flat";
-        reasons.push({dir:dir, txt:t});
+      function compOf(k){ for(var j=0;j<res.components.length;j++){ if(res.components[j].key===k) return res.components[j]; } return null; }
+      function zWord(z,invert){ // invert=true means "up is bad" (RHR)
+        var a=Math.abs(z);
+        var lowSide = invert ? z>0 : z<0;
+        if(a<0.5) return "in your normal range";
+        if(lowSide) return a>=2?"well below your normal range":a>=1?"below your normal range":"slightly below normal";
+        return a>=2?"well above your normal range":a>=1?"above your normal range":"slightly above normal";
+      }
+
+      // HRV — the anchor line, always shown when present
+      var cAc=compOf('hrvAcute');
+      if(hrv!=null&&hBase!=null){
+        var pct=Math.round(hDev*100);
+        var hz=(cAc&&cAc.z!=null)?cAc.z:null;
+        var word=hz!=null?zWord(hz,false):"";
+        reasons.push({dir: hz!=null&&hz<-0.5?"down":hz!=null&&hz>0.5?"up":"flat",
+          txt:"HRV "+Math.round(hrv)+" ms \u2014 "+(pct>=0?"+":"")+pct+"% vs your 7-day normal of "+Math.round(hBase)+" ms"+(word?", "+word:"")+(hrvSrc?" ("+hrvSrc+")":"")});
+      }
+
+      // Subjective
+      if(row.hp_subjective!=null){
+        var cs=compOf('subjective');
+        var sdir=cs&&cs.score>0.2?"up":cs&&cs.score<-0.2?"down":"flat";
+        reasons.push({dir:sdir, txt:"You rated yourself "+row.hp_subjective+"/10"+
+          (row.hp_subjective<=5?" \u2014 low enough that it holds today down on its own":
+           row.hp_subjective<=6.5?" \u2014 a bit below par":
+           row.hp_subjective>=8.5?" \u2014 feeling strong":"")});
+      }
+
+      // Weekly vs monthly trend
+      var cCh=compOf('hrvChronic');
+      if(cCh&&cCh.available&&roll7!=null&&roll30!=null){
+        var tPct=Math.round((roll7/roll30-1)*100);
+        if(Math.abs(tPct)>=3){
+          reasons.push({dir:cCh.score>0.15?"up":cCh.score<-0.15?"down":"flat",
+            txt:"Your last 7 days average "+(tPct>=0?"+":"")+tPct+"% vs your last 30 \u2014 "+
+                (tPct<=-5?"fatigue building up over time":tPct>=5?"trending fresher than usual":"steady over time")});
+        }
+      }
+
+      // Resting HR
+      var cR=compOf('rhr');
+      if(rhr!=null&&rBase!=null){
+        var rdiff=Math.round(rhr-rBase);
+        var rz=(cR&&cR.z!=null)?cR.z:null;
+        if(Math.abs(rdiff)>=1){
+          reasons.push({dir: cR&&cR.score>0.2?"up":cR&&cR.score<-0.2?"down":"flat",
+            txt:"Resting HR "+Math.round(rhr)+" bpm \u2014 "+(rdiff>0?"+"+rdiff:rdiff)+" vs your 7-day normal of "+Math.round(rBase)+" bpm"+
+                (cR&&cR.coupled?" (up while HRV is down \u2014 these agree, a real fatigue sign)":
+                 rdiff>=3?" (a rise usually means fatigue or something brewing)":
+                 rdiff<=-3?" (lower than usual \u2014 a good sign)":"")});
+        }
+      }
+
+      // Sleep hours
+      if(row.o_sleephrs!=null){
+        var cSl=compOf('sleep');
+        if(cSl&&cSl.available&&(cSl.score<-0.2||cSl.score>0.25)){
+          reasons.push({dir:cSl.score>0?"up":"down",
+            txt:"Slept "+(Math.round(row.o_sleephrs*10)/10)+" h \u2014 "+(cSl.score<0?"below":"in line with")+" your usual"});
+        }
+      }
+
+      // Oura readiness — only when it's actually saying something
+      if(row.o_readiness!=null&&(row.o_readiness>=85||row.o_readiness<68)){
+        reasons.push({dir:row.o_readiness>=85?"up":"down",
+          txt:"Oura scored your readiness "+row.o_readiness+"/100"+(row.o_readiness>=85?" \u2014 strong":" \u2014 low")});
+      }
+
+      // Hard-cap flags from the engine, translated to plain language, shown FIRST
+      var flagLines=[];
+      (res.flags||[]).forEach(function(f){
+        var msg=f.message;
+        if(f.type==="illness") msg="Body temp, resting HR and HRV are all moving the wrong way together \u2014 treat as possible illness and hold back";
+        else if(f.type==="temp") msg="Body temp above your normal overnight \u2014 often the first sign of illness or heavy stress";
+        else if(f.type==="hrv"&&/3 SD/.test(f.message)) msg="HRV is deeply suppressed \u2014 well below your normal range, so today is capped at recover";
+        else if(f.type==="hrv") msg="HRV is well below your normal range \u2014 today is held to moderate at best";
+        else if(f.type==="subjective"&&/nothing else/.test(f.message)) msg="You rated yourself low enough that it holds today down whatever the devices say";
+        else if(f.type==="subjective") msg="Your rating is below par \u2014 today is capped at moderate at best";
+        else if(f.type==="saturation") msg="A big HRV spike at a very low heart rate \u2014 read this as neutral, not a green light";
+        else if(f.type==="note") msg="You flagged pain or illness in your note \u2014 pushing toward recovery";
+        else if(f.type==="travel") msg="Long-haul travel is still in your system";
+        flagLines.push({dir:"warn", txt:msg});
       });
+
+      // Device disagreement note (confidence, not score) if the engine set it
+      if(res.confidence&&res.confidence.reasons){
+        res.confidence.reasons.forEach(function(rr){
+          if(/disagree/.test(rr)) flagLines.push({dir:"warn", txt:"Your strap and ring disagree today \u2014 one reading may be off, so lean on this a little less"});
+        });
+      }
+
+      reasons = flagLines.concat(reasons);
+      if(!reasons.length) reasons.push({dir:"flat", txt:"Not enough data yet today to explain \u2014 add more history."});
 
       // band -> keep the app's yellow naming
       var band = res.band==="amber" ? "yellow" : res.band;
@@ -831,7 +924,7 @@
         rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,
         comp:res.comp!=null?res.comp:0, score100:score100, band:band,
         reasons:reasons, confidence:(res.confidence?res.confidence.level:"low"),
-        v2:res, has:(hBase!==null&&hrv!=null)||res.score!=null,
+        v2:res, has:(hrv!=null||row.hp_hrv!=null||row.o_hrv!=null||row.hp_subjective!=null),
         travel:(getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"",
         tourn:!!getFlags(row.iso).tourn, appNote:getNote(row.iso)});
     });
