@@ -235,194 +235,604 @@
     return arr;
   }
 
-  // rolling-baseline signal engine with 360HP as HRV anchor + Oura fusion
-  function analyze(arr){
-    var W=7;
-    return arr.map(function(row,i){
-      var prior=arr.slice(Math.max(0,i-W),i);
+  // ============================================================================
+  //  READINESS SIGNAL ENGINE v2  (ln rMSSD, SWC, per-source baselines, saturation,
+  //  confidence-not-score for device disagreement, thin-data guards). Self-contained.
+  // ============================================================================
+  var RV2 = (function(){
+  const ENGINE_VERSION = 2;
 
-      // choose HRV anchor: prefer 360HP, fall back to Oura raw HRV
+  const CONFIG = {
+    weights: {
+      hrvAcute:     0.30,
+      hrvChronic:   0.08,
+      hrvStability: 0.05,
+      subjective:   0.30,
+      rhr:          0.12,
+      sleep:        0.09,
+      ouraReady:    0.06
+    },
+    baselineDays:         7,
+    chronicDays:         30,
+    dispersionDays:      60,
+    minBaselineReadings:  4,
+    minDaysForSD:        14,
+    swcMultiplier:      0.5,
+    tanhSoftness:       2.0,
+    saturationZ:        1.5,
+    saturationRHR:       50,
+    rhrCouplingAmp:     1.30,
+    subjectiveRedFloor:   5.0,
+    subjectiveAmberFloor: 6.5,
+    deepSuppressionZ:    -2.0,
+    severeSuppressionZ:  -3.0,
+    tempFlagC:            0.5,
+    illnessRhrZ:          1.0,
+    illnessHrvZ:         -1.0,
+    travelDecay: {
+      short: [0.10, 0.05],
+      long:  [0.22, 0.14, 0.07, 0.03]
+    },
+    sleepDebtNights: 3,
+    sleepRegularityDays: 7,
+    bands: { green: 59, red: 39 },
+    agreementZGap: 1.25
+  };
+
+  const isNum = v => typeof v === 'number' && isFinite(v);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+  function mean(a) {
+    const v = a.filter(isNum);
+    return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
+  }
+  function median(a) {
+    const v = a.filter(isNum).slice().sort((x, y) => x - y);
+    if (!v.length) return null;
+    const m = Math.floor(v.length / 2);
+    return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+  }
+  function sd(a) {
+    const v = a.filter(isNum);
+    if (v.length < 2) return null;
+    const m = mean(v);
+    return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / (v.length - 1));
+  }
+  function robustSD(a) {
+    const v = a.filter(isNum);
+    if (v.length < 3) return null;
+    const med = median(v);
+    const devs = v.map(x => Math.abs(x - med));
+    const m = median(devs);
+    const r = m * 1.4826;
+    return (r && r > 1e-9) ? r : sd(v);
+  }
+  function cv(a) {
+    const m = mean(a), s = sd(a);
+    return (isNum(m) && isNum(s) && Math.abs(m) > 1e-9) ? s / Math.abs(m) : null;
+  }
+  function squash(z, softness = CONFIG.tanhSoftness) {
+    return Math.tanh(z / softness);
+  }
+
+  function priorDays(history, targetDate, n) {
+    const before = history.filter(d => d.date < targetDate);
+    return before.slice(-n);
+  }
+  function series(days, key, transform) {
+    return days
+      .map(d => (isNum(d[key]) && d[key] > 0 ? (transform ? transform(d[key]) : d[key]) : null))
+      .filter(isNum);
+  }
+  const ln = x => Math.log(x);
+
+  function buildBaseline(days, key, transform) {
+    const shortWin = days.slice(-CONFIG.baselineDays);
+    const dispWin  = days.slice(-CONFIG.dispersionDays);
+    const shortVals = series(shortWin, key, transform);
+    const dispVals  = series(dispWin,  key, transform);
+    const center = median(shortVals);
+    const spread = robustSD(dispVals);
+    return {
+      center, spread,
+      n: shortVals.length, nRef: dispVals.length,
+      swc: isNum(spread) ? spread * CONFIG.swcMultiplier : null,
+      valid: isNum(center) && shortVals.length >= CONFIG.minBaselineReadings,
+      spreadReliable: isNum(spread) && dispVals.length >= CONFIG.minDaysForSD
+    };
+  }
+  function zScore(value, baseline) {
+    if (!isNum(value) || !baseline || !isNum(baseline.center)) return null;
+    if (!isNum(baseline.spread) || baseline.spread < 1e-9) return null;
+    return (value - baseline.center) / baseline.spread;
+  }
+
+  function componentHrvAcute(today, hist) {
+    const sources = [
+      { key: 'hp_hrv', label: '360HP', val: today.hp_hrv },
+      { key: 'o_hrv',  label: 'Oura',  val: today.o_hrv  }
+    ];
+    for (const src of sources) {
+      if (!isNum(src.val) || src.val <= 0) continue;
+      const base = buildBaseline(hist, src.key, ln);
+      if (!base.valid) continue;
+      const z = zScore(ln(src.val), base);
+      if (!isNum(z)) continue;
+      const zEff = Math.min(z, CONFIG.saturationZ);
+      const score = squash(zEff);
+      const meaningful = isNum(base.swc) && Math.abs(ln(src.val) - base.center) > base.swc;
+      return {
+        available: true, score, z, source: src.label, meaningful,
+        note: meaningful
+          ? `${src.label} HRV ${z >= 0 ? 'above' : 'below'} baseline by more than the smallest worthwhile change`
+          : `${src.label} HRV within normal day-to-day noise`
+      };
+    }
+    return { available: false, score: 0, z: null, note: 'No usable HRV today' };
+  }
+
+  function componentHrvChronic(today, hist) {
+    const key = series(priorDays(hist, today.date, 7), 'hp_hrv', ln).length >= 4
+      ? 'hp_hrv' : 'o_hrv';
+    const w7  = series(priorDays(hist, today.date, CONFIG.baselineDays), key, ln);
+    const w30 = series(priorDays(hist, today.date, CONFIG.chronicDays),  key, ln);
+    if (w7.length < 4 || w30.length < CONFIG.minDaysForSD) {
+      return { available: false, score: 0, z: null, note: 'Not enough history for a trend' };
+    }
+    const m7 = mean(w7), m30 = mean(w30);
+    const spread = robustSD(w30);
+    if (!isNum(spread) || spread < 1e-9) {
+      return { available: false, score: 0, z: null, note: 'Trend dispersion unavailable' };
+    }
+    const z = (m7 - m30) / spread;
+    return {
+      available: true, score: squash(z, 1.0), z,
+      note: z >= 0 ? 'Weekly HRV above the monthly norm' : 'Weekly HRV below the monthly norm'
+    };
+  }
+
+  function componentHrvStability(today, hist) {
+    const recent = series(priorDays(hist, today.date, CONFIG.baselineDays), 'hp_hrv', ln);
+    const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
+    if (recent.length < 5 || refDays.length < CONFIG.dispersionDays / 2) {
+      return { available: false, score: 0, z: null, note: 'Not enough data for HRV stability' };
+    }
+    const cvNow = cv(recent);
+    if (!isNum(cvNow)) return { available: false, score: 0, z: null, note: 'CV unavailable' };
+    const hist7cvs = [];
+    for (let i = CONFIG.baselineDays; i <= refDays.length; i++) {
+      const w = series(refDays.slice(i - CONFIG.baselineDays, i), 'hp_hrv', ln);
+      if (w.length >= 5) { const c = cv(w); if (isNum(c)) hist7cvs.push(c); }
+    }
+    if (hist7cvs.length < 10) {
+      return { available: false, score: 0, z: null, note: 'Not enough history for CV norm' };
+    }
+    const cvBase = median(hist7cvs), cvSpread = robustSD(hist7cvs);
+    if (!isNum(cvSpread) || cvSpread < 1e-9) {
+      return { available: false, score: 0, z: null, note: 'CV norm unavailable' };
+    }
+    const z = (cvNow - cvBase) / cvSpread;
+    const rhrNow = isNum(today.o_rhr) ? today.o_rhr : today.hp_rhr;
+    const saturationPlausible = isNum(rhrNow) && rhrNow <= CONFIG.saturationRHR;
+    let score = 0, note = 'HRV day-to-day variation is normal';
+    if (z > 1.0) {
+      score = -squash(z - 1.0, 1.5) * 0.8;
+      note = 'HRV is bouncing around more than usual - stress may be accumulating';
+    } else if (z < -1.5 && saturationPlausible) {
+      score = -squash(Math.abs(z) - 1.5, 1.5) * 0.6;
+      note = 'HRV has gone unusually flat at a low heart rate - watch for overreaching';
+    }
+    return { available: true, score, z, note };
+  }
+
+  function componentSubjective(today, hist) {
+    const v = today.hp_subjective;
+    if (!isNum(v)) {
+      return { available: false, score: 0, z: null, note: 'No subjective rating today' };
+    }
+    const base = buildBaseline(priorDays(hist, today.date, CONFIG.dispersionDays), 'hp_subjective');
+    const absScore = clamp((v - 6.5) / 3.0, -1, 1);
+    let relScore = null;
+    const z = base.valid ? zScore(v, base) : null;
+    if (isNum(z)) relScore = squash(z);
+    const score = isNum(relScore) ? (0.55 * absScore + 0.45 * relScore) : absScore;
+    return { available: true, score: clamp(score, -1, 1), z, note: `You rated yourself ${v}/10` };
+  }
+
+  function componentRhr(today, hist, hrvZ) {
+    const sources = [
+      { key: 'hp_rhr', label: '360HP', val: today.hp_rhr },
+      { key: 'o_rhr',  label: 'Oura',  val: today.o_rhr  }
+    ];
+    for (const src of sources) {
+      if (!isNum(src.val) || src.val <= 0) continue;
+      const base = buildBaseline(hist, src.key);
+      if (!base.valid) continue;
+      const z = zScore(src.val, base);
+      if (!isNum(z)) continue;
+      let score = -squash(z);
+      let coupled = false;
+      if (isNum(hrvZ) && hrvZ < -0.5 && z > 0.5) {
+        score *= CONFIG.rhrCouplingAmp;
+        coupled = true;
+      }
+      return {
+        available: true, score: clamp(score, -1, 1), z, source: src.label, coupled,
+        note: coupled
+          ? `Resting HR up while HRV is down (${src.label}) - these agree`
+          : `Resting HR ${z >= 0 ? 'above' : 'below'} your ${src.label} baseline`
+      };
+    }
+    return { available: false, score: 0, z: null, note: 'No resting HR today' };
+  }
+
+  function componentSleep(today, hist) {
+    const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
+    const hoursHist = series(refDays, 'o_sleep_hours');
+    const parts = [];
+    if (hoursHist.length >= CONFIG.minDaysForSD && isNum(today.o_sleep_hours)) {
+      const need = median(hoursHist);
+      const recent = [today, ...priorDays(hist, today.date, CONFIG.sleepDebtNights - 1)]
+        .map(d => d.o_sleep_hours).filter(isNum);
+      if (recent.length) {
+        const debt = recent.reduce((s, h) => s + Math.max(0, need - h), 0);
+        parts.push({ w: 0.6, s: clamp(-debt / 3.0, -1, 0.15) });
+      }
+    }
+    const mids = series(priorDays(hist, today.date, CONFIG.sleepRegularityDays), 'o_sleep_midpoint');
+    const midsRef = series(refDays, 'o_sleep_midpoint');
+    if (mids.length >= 5 && midsRef.length >= CONFIG.minDaysForSD) {
+      const nowSD = sd(mids);
+      const refSDs = [];
+      for (let i = CONFIG.sleepRegularityDays; i <= refDays.length; i++) {
+        const w = series(refDays.slice(i - CONFIG.sleepRegularityDays, i), 'o_sleep_midpoint');
+        if (w.length >= 5) { const s = sd(w); if (isNum(s)) refSDs.push(s); }
+      }
+      if (isNum(nowSD) && refSDs.length >= 10) {
+        const b = median(refSDs), sp = robustSD(refSDs);
+        if (isNum(sp) && sp > 1e-9) {
+          parts.push({ w: 0.2, s: clamp(-squash((nowSD - b) / sp), -1, 0.5) });
+        }
+      }
+    }
+    if (isNum(today.o_sleep_score)) {
+      parts.push({ w: 0.2, s: clamp((today.o_sleep_score - 75) / 20, -1, 1) });
+    }
+    if (!parts.length) {
+      return { available: false, score: 0, z: null, note: 'No sleep data' };
+    }
+    const wSum = parts.reduce((s, p) => s + p.w, 0);
+    const score = parts.reduce((s, p) => s + p.w * p.s, 0) / wSum;
+    return {
+      available: true, score: clamp(score, -1, 1), z: null,
+      note: score < -0.25 ? 'Sleep is running short or irregular'
+          : score >  0.25 ? 'Sleep has been solid'
+          : 'Sleep is around normal'
+    };
+  }
+
+  function componentOuraReadiness(today) {
+    if (!isNum(today.o_readiness)) {
+      return { available: false, score: 0, z: null, note: 'No Oura readiness' };
+    }
+    return {
+      available: true, score: clamp((today.o_readiness - 70) / 20, -1, 1), z: null,
+      note: `Oura readiness ${Math.round(today.o_readiness)}`
+    };
+  }
+
+  function travelPenalty(today, hist) {
+    const lookback = [...priorDays(hist, today.date, 5), today];
+    let worst = 0, label = null;
+    lookback.forEach((d, i) => {
+      const daysSince = lookback.length - 1 - i;
+      const mode = d.travel;
+      if (!mode || mode === 'none') return;
+      const decay = CONFIG.travelDecay[mode];
+      if (!decay) return;
+      const idx = daysSince - 1;
+      if (idx < 0 || idx >= decay.length) return;
+      if (decay[idx] > worst) { worst = decay[idx]; label = mode; }
+    });
+    return { penalty: worst, mode: label };
+  }
+
+  function buildFlags(today, comps, travel) {
+    const flags = [];
+    const hrvZ = comps.hrvAcute.z;
+    const rhrZ = comps.rhr.z;
+    const tags = (today.noteTags || []).map(t => String(t).toLowerCase());
+    if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC &&
+        isNum(rhrZ) && rhrZ >= CONFIG.illnessRhrZ &&
+        isNum(hrvZ) && hrvZ <= CONFIG.illnessHrvZ) {
+      flags.push({ type: 'illness', cap: 'red',
+        message: 'Temperature, resting HR and HRV are all moving the wrong way together - treat as possible illness' });
+    } else if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC) {
+      flags.push({ type: 'temp', cap: 'amber',
+        message: `Body temperature ${today.o_temp_dev.toFixed(1)}C above your normal` });
+    }
+    if (isNum(today.hp_subjective)) {
+      if (today.hp_subjective <= CONFIG.subjectiveRedFloor) {
+        flags.push({ type: 'subjective', cap: 'red',
+          message: 'You rated yourself low enough that nothing else overrides it' });
+      } else if (today.hp_subjective <= CONFIG.subjectiveAmberFloor) {
+        flags.push({ type: 'subjective', cap: 'amber',
+          message: 'Subjective rating is below your working threshold' });
+      }
+    }
+    if (isNum(hrvZ) && hrvZ <= CONFIG.severeSuppressionZ) {
+      flags.push({ type: 'hrv', cap: 'red',
+        message: 'HRV is more than 3 SD below baseline - nothing else outweighs this' });
+    } else if (isNum(hrvZ) && hrvZ <= CONFIG.deepSuppressionZ) {
+      flags.push({ type: 'hrv', cap: 'amber',
+        message: 'HRV is more than 2 SD below baseline - deep suppression' });
+    }
+    const rhrNow = isNum(today.o_rhr) ? today.o_rhr : today.hp_rhr;
+    if (isNum(hrvZ) && hrvZ > CONFIG.saturationZ &&
+        isNum(rhrNow) && rhrNow <= CONFIG.saturationRHR) {
+      flags.push({ type: 'saturation', cap: null,
+        message: 'HRV is well above baseline at a very low heart rate - read this as neutral, not as a green light' });
+    }
+    if (tags.some(t => /pain|injur|sore|ill|sick|cold|flu/.test(t))) {
+      flags.push({ type: 'note', cap: 'amber',
+        message: 'You logged pain or illness in your note' });
+    }
+    if (travel.mode === 'long' && travel.penalty >= 0.14) {
+      flags.push({ type: 'travel', cap: 'amber',
+        message: 'Long-haul travel is still in your system' });
+    }
+    return flags;
+  }
+
+  function buildConfidence(comps, coverage, hist, today) {
+    const reasons = [];
+    let level = 3;
+    const days = priorDays(hist, today.date, CONFIG.dispersionDays).length;
+    if (days < CONFIG.baselineDays)      { level = 0; reasons.push('Baseline is still building'); }
+    else if (days < CONFIG.minDaysForSD) { level = Math.min(level, 1); reasons.push('Fewer than two weeks of baseline'); }
+    else if (days < 28)                  { level = Math.min(level, 2); reasons.push('Under four weeks of baseline'); }
+    if (coverage < 0.6) { level = Math.min(level, 1); reasons.push('Several inputs missing today'); }
+    else if (coverage < 0.85) { level = Math.min(level, 2); reasons.push('Some inputs missing today'); }
+    if (isNum(today.hp_hrv) && isNum(today.o_hrv)) {
+      const zHp = zScore(ln(today.hp_hrv), buildBaseline(hist, 'hp_hrv', ln));
+      const zOu = zScore(ln(today.o_hrv),  buildBaseline(hist, 'o_hrv',  ln));
+      if (isNum(zHp) && isNum(zOu) && Math.abs(zHp - zOu) > CONFIG.agreementZGap) {
+        level = Math.min(level, 1);
+        reasons.push('Your strap and ring disagree today - one reading may be poor quality');
+      }
+    }
+    return { level: ['low', 'moderate', 'good', 'high'][level], reasons };
+  }
+
+  function computeReadiness(today, history, overrides) {
+    const cfg = Object.assign({}, CONFIG, overrides || {});
+    const hist = (history || [])
+      .filter(d => d && d.date && d.date < today.date)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    const hrvAcute = componentHrvAcute(today, hist);
+    const comps = {
+      hrvAcute,
+      hrvChronic:   componentHrvChronic(today, hist),
+      hrvStability: componentHrvStability(today, hist),
+      subjective:   componentSubjective(today, hist),
+      rhr:          componentRhr(today, hist, hrvAcute.z),
+      sleep:        componentSleep(today, hist),
+      ouraReady:    componentOuraReadiness(today)
+    };
+    let availableWeight = 0, weighted = 0;
+    const breakdown = [];
+    for (const key of Object.keys(cfg.weights)) {
+      const w = cfg.weights[key];
+      const c = comps[key];
+      if (c.available) { availableWeight += w; weighted += w * c.score; }
+      breakdown.push({
+        key, weight: w, available: c.available,
+        score: c.available ? Number(c.score.toFixed(3)) : null,
+        z: isNum(c.z) ? Number(c.z.toFixed(2)) : null,
+        note: c.note, source: c.source || null
+      });
+    }
+    const hasFreshInput = [today.hp_hrv, today.o_hrv, today.hp_subjective,
+                           today.hp_rhr, today.o_rhr, today.o_sleep_hours,
+                           today.o_readiness].some(v => isNum(v) && v > 0);
+    const coverage = availableWeight;
+    if (!hasFreshInput || availableWeight < 0.2) {
+      return {
+        engineVersion: ENGINE_VERSION, score: null, band: 'unknown', action: 'No data',
+        comp: null, coverage, components: breakdown, flags: [],
+        confidence: { level: 'low', reasons: ['Not enough inputs to score today'] },
+        why: ['Not enough data today to produce a signal.']
+      };
+    }
+    let comp = weighted / availableWeight;
+    const travel = travelPenalty(today, hist);
+    if (travel.penalty > 0) comp -= travel.penalty;
+    comp = clamp(comp, -1, 1);
+    let score = Math.round(50 + 50 * comp);
+    score = clamp(score, 0, 100);
+    let band = score >= cfg.bands.green ? 'green'
+             : score >= cfg.bands.red   ? 'amber'
+             : 'red';
+    const flags = buildFlags(today, comps, travel);
+    const rank = { green: 2, amber: 1, red: 0 };
+    for (const f of flags) {
+      if (!f.cap) continue;
+      if (rank[f.cap] < rank[band]) {
+        band = f.cap;
+        const ceiling = f.cap === 'amber' ? cfg.bands.green - 1 : cfg.bands.red - 1;
+        score = Math.min(score, ceiling);
+      }
+    }
+    const action = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
+    const confidence = buildConfidence(comps, coverage, hist, today);
+
+    // Guard against over-confident calls on thin data: pull the score toward neutral (50)
+    // when the baseline isn't established or coverage is low. A day the engine can't stand
+    // behind should read "moderate / still learning", never a confident green or red.
+    // Caps from hard flags are exempt — an illness/subjective red must survive this.
+    const capBands = flags.filter(f => f.cap).map(f => f.cap);
+    const hasRedCap = capBands.indexOf('red') >= 0;
+    const hasAmberCap = capBands.indexOf('amber') >= 0;
+    if (!hasRedCap && !hasAmberCap) {
+      const shrinkByConf = { low: 0.35, moderate: 0.6, good: 0.85, high: 1.0 }[confidence.level];
+      const shrinkByCov  = clamp(coverage / 0.85, 0.2, 1);
+      const shrink = Math.min(shrinkByConf, shrinkByCov);
+      if (shrink < 1) {
+        score = Math.round(50 + (score - 50) * shrink);
+        band = score >= cfg.bands.green ? 'green' : score >= cfg.bands.red ? 'amber' : 'red';
+      }
+    }
+    const actionFinal = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
+
+    // A "green / push" call should rest on broad agreement, not a single strong input.
+    // If coverage is thin, the best a positive day can read is amber ("moderate").
+    let bandGuarded = band, scoreGuarded = score;
+    if (band === 'green' && coverage < 0.55 && !hasRedCap) {
+      bandGuarded = 'amber';
+      scoreGuarded = Math.min(score, cfg.bands.green - 1);
+    }
+    band = bandGuarded; score = scoreGuarded;
+    const actionGuarded = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
+    const why = breakdown
+      .filter(b => b.available)
+      .map(b => ({ ...b, contribution: Math.abs(b.weight * b.score) }))
+      .sort((a, b) => b.contribution - a.contribution)
+      .map(b => b.note);
+    flags.forEach(f => why.unshift(f.message));
+    if (travel.penalty > 0) {
+      why.push(`${travel.mode === 'long' ? 'Long-haul' : 'Short-haul'} travel is still being counted against today`);
+    }
+    if (coverage < 0.99) {
+      const missing = breakdown.filter(b => !b.available).map(b => b.key);
+      why.push(`Scored on the inputs available (missing: ${missing.join(', ')})`);
+    }
+    return {
+      engineVersion: ENGINE_VERSION,
+      score, band, action: actionGuarded,
+      comp: Number(comp.toFixed(3)),
+      coverage: Number(coverage.toFixed(2)),
+      components: breakdown, flags, confidence, travel, why
+    };
+  }
+
+  function recomputeAll(allDays) {
+    const sorted = (allDays || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+    return sorted.map((day, i) => ({
+      date: day.date,
+      ...computeReadiness(day, sorted.slice(0, i))
+    }));
+  }
+
+  function selfTest() {
+    const days = [];
+    const start = new Date('2026-05-01');
+    for (let i = 0; i < 60; i++) {
+      const d = new Date(start); d.setDate(d.getDate() + i);
+      days.push({
+        date: d.toISOString().slice(0, 10),
+        hp_hrv: 62 + Math.sin(i / 3) * 6,
+        hp_rhr: 48 + Math.cos(i / 4) * 2,
+        hp_subjective: 7.5,
+        o_hrv: 58 + Math.sin(i / 3) * 5,
+        o_rhr: 44 + Math.cos(i / 4) * 2,
+        o_readiness: 78, o_sleep_score: 80,
+        o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
+        travel: 'none'
+      });
+    }
+    const base = { date: '2026-07-01', hp_hrv: 62, hp_rhr: 48, hp_subjective: 7.5,
+                   o_hrv: 58, o_rhr: 44, o_readiness: 78, o_sleep_score: 80,
+                   o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
+                   travel: 'none' };
+    const cases = {
+      'steady day':          base,
+      'HRV crash':           { ...base, hp_hrv: 34, o_hrv: 32 },
+      'illness triad':       { ...base, hp_hrv: 40, o_hrv: 38, hp_rhr: 56, o_rhr: 52, o_temp_dev: 0.7 },
+      'low subjective':      { ...base, hp_subjective: 4 },
+      'no strap (Oura only)':{ ...base, hp_hrv: null, hp_rhr: null, hp_subjective: null },
+      'long-haul yesterday': { ...base, travel: 'none' }
+    };
+    const histWithFlight = days.map((d, i) =>
+      i === days.length - 1 ? { ...d, travel: 'long' } : d);
+    const out = {};
+    for (const [name, day] of Object.entries(cases)) {
+      const hist = name === 'long-haul yesterday' ? histWithFlight : days;
+      const r = computeReadiness(day, hist);
+      out[name] = `${r.score} ${r.band.toUpperCase()} (${r.action}, confidence ${r.confidence.level}, coverage ${r.coverage})`;
+    }
+    return out;
+  }
+
+    return { compute: computeReadiness, recompute: recomputeAll, CONFIG: CONFIG, VERSION: ENGINE_VERSION };
+  })();
+
+  // Map an app day-row (from fuse) to the engine's expected input shape.
+  function toEngineDay(row){
+    return {
+      date: row.iso,
+      hp_hrv: (row.hp_hrv!=null?row.hp_hrv:null),
+      o_hrv:  (row.o_hrv!=null?row.o_hrv:null),
+      hp_rhr: (row.hp_rhr!=null?row.hp_rhr:null),
+      o_rhr:  (row.o_rhr!=null?row.o_rhr:null),
+      hp_subjective: (row.hp_subjective!=null?row.hp_subjective:null),
+      o_readiness: (row.o_readiness!=null?row.o_readiness:null),
+      o_sleep_score: (row.o_sleepscore!=null?row.o_sleepscore:null),
+      o_sleep_hours: (row.o_sleephrs!=null?row.o_sleephrs:null),
+      o_sleep_midpoint: null,               // not captured yet; regularity term stays dormant
+      o_temp_dev: (row.o_tempdev!=null?row.o_tempdev:null),
+      travel: (getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"none",
+      noteTags: (function(){ var t=((row.tags||"")+" "+(getNote(row.iso)||row.note||"")).toLowerCase(); return t.trim()?[t]:[]; })()
+    };
+  }
+
+  // v2-powered analyze: keeps the exact output contract the UI already consumes.
+  function analyze(arr){
+    var engineDays = arr.map(toEngineDay);
+    return arr.map(function(row,i){
+      var hist = engineDays.slice(0,i);          // engine only looks at prior days
+      var res  = RV2.compute(engineDays[i], hist);
+
+      // pull component detail for the fields the UI still shows directly
+      function comp(k){ for(var j=0;j<res.components.length;j++){ if(res.components[j].key===k) return res.components[j]; } return null; }
+      var cAc = comp('hrvAcute')||{};
+
+      // recover the display HRV/RHR + baselines (median on the natural scale, for the stat cards)
+      var prior=arr.slice(Math.max(0,i-7),i);
       function hrvOf(d){ return d.hp_hrv!=null?d.hp_hrv:(d.o_hrv!=null?d.o_hrv:null); }
       var hrv=hrvOf(row), hrvSrc=row.hp_hrv!=null?"360HP":(row.o_hrv!=null?"Oura":null);
-      var hp=prior.map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
-      var hBase=hp.length>=3?median(hp):null, hSd=hp.length>=3?stdev(hp):null;
+      var hpv=prior.map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
+      var hBase=hpv.length>=3?median(hpv):null, hSd=hpv.length>=3?stdev(hpv):null;
       var hDev=(hBase&&hrv!=null)?(hrv-hBase)/hBase:null;
-
-      // resting HR: prefer 360HP, else Oura
       var rhr=row.hp_rhr!=null?row.hp_rhr:(row.o_rhr!=null?row.o_rhr:null);
-      var rhrSrc=row.hp_rhr!=null?"360HP":(row.o_rhr!=null?"Oura":null);
       var rp=prior.map(function(d){return d.hp_rhr!=null?d.hp_rhr:d.o_rhr;}).filter(function(v){return v!=null&&isFinite(v);});
       var rBase=rp.length>=3?median(rp):null;
-
-      // rolling avgs of HRV anchor
       var w7=arr.slice(Math.max(0,i-6),i+1).map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
       var w30=arr.slice(Math.max(0,i-29),i+1).map(hrvOf).filter(function(v){return v!=null&&isFinite(v);});
       var roll7=w7.length>=3?mean(w7):null, roll30=w30.length>=5?mean(w30):null;
 
-      // ---- component sub-scores (-1 bad .. +1 good) ----
-      // Each component is normalised against YOUR OWN variability (a z-score) rather than a
-      // fixed percentage, so "a meaningful drop" means meaningful *for you*. This is the
-      // approach used in HRV-guided training research (deviation vs personal SD, not absolutes).
+      // adapt the engine's plain-language "why" list into the UI's {dir,txt} reasons
       var reasons=[];
-      var parts=[], weights=[];
+      (res.flags||[]).forEach(function(f){ reasons.push({dir:"warn", txt:f.message}); });
+      (res.why||[]).forEach(function(t){
+        if(typeof t!=="string") return;
+        if(reasons.some(function(r){return r.txt===t;})) return;
+        var low=t.toLowerCase();
+        var dir = /below|down|short|irregular|disagree|illness|low|suppress|against|bouncing/.test(low) ? "down"
+                : /above|solid|good|strong|agree/.test(low) ? "up" : "flat";
+        reasons.push({dir:dir, txt:t});
+      });
 
-      // HRV vs personal baseline, scaled by personal SD (z-score, capped at ±2 SD)
-      if(hDev!==null){
-        var hScore;
-        var zH=null;
-        if(hSd&&hSd>0){
-          zH=(hrv-hBase)/hSd;                    // how many of YOUR SDs from YOUR normal
-          hScore=Math.max(-1,Math.min(1,zH/1.5)); // 1.5 SD = full deflection
-        } else {
-          hScore=Math.max(-1,Math.min(1,hDev/0.15)); // fallback if SD not yet available
-        }
-        parts.push(hScore); weights.push(0.40);
-        var pct=Math.round(hDev*100);
-        var hWord=zH==null?"":(Math.abs(zH)<0.5?"in your normal range":
-                    zH<=-1.5?"well below your normal range":
-                    zH<=-1?"below your normal range":
-                    zH>=1.5?"well above your normal range":
-                    zH>=1?"above your normal range":
-                    zH<0?"slightly below normal":"slightly above normal");
-        reasons.push({dir:hScore>0.15?"up":hScore<-0.15?"down":"flat",
-          txt:"HRV "+Math.round(hrv)+" ms \u2014 "+(pct>=0?"+":"")+pct+"% vs your 7-day normal of "+Math.round(hBase)+" ms"+(hWord?", "+hWord:"")+(hrvSrc?" ("+hrvSrc+")":"")});
-      }
+      // band -> keep the app's yellow naming
+      var band = res.band==="amber" ? "yellow" : res.band;
+      var score100 = res.score!=null ? res.score : 0;
 
-      // Acute:chronic HRV — 7-day vs 30-day. The stronger accumulating-fatigue signal.
-      if(roll7!=null&&roll30!=null&&roll30>0){
-        var acwr=roll7/roll30;
-        var aScore=Math.max(-1,Math.min(1,(acwr-1)/0.08));
-        parts.push(aScore); weights.push(0.12);
-        var aPct=Math.round((acwr-1)*100);
-        if(Math.abs(aPct)>=3){
-          reasons.push({dir:aScore>0.2?"up":aScore<-0.2?"down":"flat",
-            txt:"Your last 7 days average "+(aPct>=0?"+":"")+aPct+"% "+(aPct>=0?"above":"below")+" your last 30 \u2014 "+
-                (aPct<=-5?"fatigue building up over time":aPct>=5?"trending fresher than usual":"steady over time")});
-        }
-      }
-
-      // Subjective, anchored to YOUR personal average rather than a fixed 7.5
-      if(row.hp_subjective!=null){
-        var sp=prior.map(function(d){return d.hp_subjective;}).filter(function(v){return v!=null&&isFinite(v);});
-        var sBase=sp.length>=3?mean(sp):7.5;
-        var sSd=sp.length>=3?stdev(sp):null;
-        var sScore;
-        if(sSd&&sSd>0.3){ sScore=Math.max(-1,Math.min(1,(row.hp_subjective-sBase)/(1.5*sSd))); }
-        else { sScore=Math.max(-1,Math.min(1,(row.hp_subjective-sBase)/1.5)); }
-        parts.push(sScore); weights.push(0.26);
-        var sDiff=(row.hp_subjective-sBase);
-        reasons.push({dir:sScore>0.2?"up":sScore<-0.2?"down":"flat",
-          txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 your usual is about "+(Math.round(sBase*10)/10)+
-              (Math.abs(sDiff)<0.4?", so about normal":(sDiff>0?", so better than usual":", so worse than usual"))});
-      }
-
-      // Resting HR vs personal baseline, scaled by personal SD
-      if(rBase&&rhr!=null){
-        var rSd=rp.length>=3?stdev(rp):null;
-        var rd=(rhr-rBase)/rBase;
-        var rScore;
-        if(rSd&&rSd>0.5){ rScore=Math.max(-1,Math.min(1,-(rhr-rBase)/(1.5*rSd))); }
-        else { rScore=Math.max(-1,Math.min(1,-rd/0.08)); }
-        parts.push(rScore); weights.push(0.12);
-        var rdiff=Math.round(rhr-rBase);
-        if(Math.abs(rdiff)>=1){
-          reasons.push({dir:rScore>0.2?"up":rScore<-0.2?"down":"flat",
-            txt:"Resting HR "+Math.round(rhr)+" bpm \u2014 "+(rdiff>0?"+"+rdiff:rdiff)+" vs your 7-day normal of "+Math.round(rBase)+" bpm"+
-                (rdiff>=3?" (a rise usually means fatigue or something brewing)":rdiff<=-3?" (lower than usual \u2014 a good sign)":"")});
-        }
-      }
-
-      // Sleep duration — strong independent predictor; judged against your own average
-      if(row.o_sleephrs!=null){
-        var slp=prior.map(function(d){return d.o_sleephrs;}).filter(function(v){return v!=null&&isFinite(v);});
-        var slBase=slp.length>=3?mean(slp):7.5;
-        var hScoreSleep=Math.max(-1,Math.min(1,(row.o_sleephrs-slBase)/1.2));
-        parts.push(hScoreSleep); weights.push(0.05);
-        var slDiff=row.o_sleephrs-slBase;
-        if(Math.abs(slDiff)>=0.6){
-          reasons.push({dir:hScoreSleep>0?"up":"down",
-            txt:"Slept "+(Math.round(row.o_sleephrs*10)/10)+" h \u2014 "+(slDiff>0?"+":"")+(Math.round(slDiff*10)/10)+" h vs your usual "+(Math.round(slBase*10)/10)+" h"});
-        }
-      }
-
-      if(row.o_readiness!=null){
-        var oScore=Math.max(-1,Math.min(1,(row.o_readiness-75)/15));
-        parts.push(oScore); weights.push(0.05);
-        if(row.o_readiness>=85||row.o_readiness<68){
-          reasons.push({dir:oScore>0.2?"up":oScore<-0.2?"down":"flat",
-            txt:"Oura scored your readiness "+row.o_readiness+"/100"+(row.o_readiness>=85?" \u2014 strong":" \u2014 low")});
-        }
-      }
-      if(row.o_sleepscore!=null){
-        var slScore=Math.max(-1,Math.min(1,(row.o_sleepscore-75)/18));
-        parts.push(slScore); weights.push(0.05);
-        if(row.o_sleepscore<70||row.o_sleepscore>=88){
-          reasons.push({dir:slScore>0?"up":"down", txt:"Oura rated last night's sleep "+row.o_sleepscore+"/100"+(row.o_sleepscore<70?" (poor)":" (good)")});
-        }
-      }
-
-      // weighted composite
-      var wsum=weights.reduce(function(a,b){return a+b;},0)||1;
-      var comp=0; for(var k=0;k<parts.length;k++) comp+=parts[k]*weights[k]; comp/=wsum;
-
-      // ---- temperature warning (illness/stress early flag) ----
-      var tempFlag=false;
-      if(row.o_tempdev!=null && row.o_tempdev>=0.5){
-        tempFlag=true; comp=Math.min(comp,comp-0.25);
-        reasons.push({dir:"warn", txt:"Body temp ran "+row.o_tempdev.toFixed(1)+"\u00b0C above your normal overnight \u2014 often the earliest sign of illness or heavy stress, so the score is pulled down"});
-      }
-
-      // ---- subjective override: a rough morning pulls toward caution on its own ----
-      if(row.hp_subjective!=null){
-        if(row.hp_subjective<=5){
-          comp=Math.min(comp,-0.35);
-          reasons.push({dir:"warn", txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 when you feel that rough, the score is held down no matter what the devices say"});
-        } else if(row.hp_subjective<=6.5){
-          comp=Math.min(comp,-0.05);
-          reasons.push({dir:"warn", txt:"You rated yourself "+row.hp_subjective+"/10 \u2014 low enough that today is capped at moderate, whatever else looks good"});
-        }
-      }
-
-      // ---- tag override (pain/illness in 360HP notes) ----
-      var text=((row.tags||"")+" "+(row.note||"")).toLowerCase();
-      if(["pain","fatigue","ill","sick","injur","lock"].some(function(w){return text.indexOf(w)>=0;})){
-        comp=Math.min(comp,-0.5);
-        reasons.push({dir:"warn", txt:"You noted \u201c"+(row.tags||row.note)+"\u201d \u2014 pain or illness overrides the numbers and pushes today toward recovery"});
-      }
-
-      // ---- agreement / disagreement between 360HP HRV and Oura readiness ----
-      var confidence="single source";
-      if(hDev!==null && row.o_readiness!=null){
-        var hpPos=hDev>0.03, hpNeg=hDev<-0.03;
-        var ouPos=row.o_readiness>=78, ouNeg=row.o_readiness<70;
-        if((hpPos&&ouPos)||(hpNeg&&ouNeg)) confidence="high \u2014 both devices agree";
-        else if((hpPos&&ouNeg)||(hpNeg&&ouPos)){
-          confidence="mixed \u2014 your two devices disagree";
-          comp=comp>0?comp*0.5:comp*0.7; // pull toward neutral/caution on conflict
-          reasons.push({dir:"warn", txt:"Your 360HP reading and Oura are telling different stories today \u2014 when they disagree the score is pulled toward the cautious side"});
-        } else confidence="moderate";
-      }
-
-      // ---- travel: a flight YESTERDAY is recorded as CONTEXT only ----
-      // Deliberately does NOT move the score — HRV, resting HR and subjective already
-      // capture a flight's real cost. Penalising on top would double-count it.
-      // The flag exists so a dip can be explained, not pre-judged.
-      var prevIso=(function(){ var d=new Date(row.iso+"T00:00:00"); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
-      var travel=(getFlags(prevIso).travel)||"";
-      if(travel){
-        reasons.push({dir:"flat", txt:(travel==="long"?"Long-haul":"Short-haul")+" flight yesterday \u2014 context for today's numbers (not scored)"});
-      }
-
-      var band=comp>=0.15?"green":(comp>=-0.2?"yellow":"red");
-      var hasAnchor=(hBase!==null && hrv!=null);
-
-      // 0-100 readiness score: comp is -1..+1. Map so 50 = baseline/neutral,
-      // with a gentle curve so mid-range days aren't all bunched together.
-      var score100=Math.round(50 + 50*Math.max(-1,Math.min(1, comp*1.15)));
-
-      return Object.assign({},row,{hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
-        rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,comp:comp,score100:score100,band:band,
-        reasons:reasons,confidence:confidence,tempFlag:tempFlag,has:hasAnchor,travel:travel,
+      return Object.assign({},row,{
+        hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
+        rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,
+        comp:res.comp!=null?res.comp:0, score100:score100, band:band,
+        reasons:reasons, confidence:(res.confidence?res.confidence.level:"low"),
+        v2:res, has:(hBase!==null&&hrv!=null)||res.score!=null,
+        travel:(getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"",
         tourn:!!getFlags(row.iso).tourn, appNote:getNote(row.iso)});
     });
   }
@@ -537,11 +947,14 @@
     ],LEG);
 
     // daily score bars
-    (function(){var cd=card("Daily readiness score","0\u2013100 from all sources fused. Green \u2265 59, amber 39\u201358, red < 39.");
+    (function(){var cd=card("Daily readiness score","0\u2013100 from all sources fused. Green \u2265 59, amber 39\u201358, red < 39. Dotted line is your 7-day average.");
       var cv=mkCanvas(cd,200);container.appendChild(cd);
-      CHARTS.push(new Chart(cv,{type:"bar",data:{labels:labels,datasets:[
-        {label:"score",data:rowsB.map(function(d){return d.score100;}),backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3}
-      ]},options:baseOpts({scales:{y:{min:0,max:100}}})}));})();
+      var sc=rowsB.map(function(d){return d.score100;});
+      var scRoll=sc.map(function(_,i){var w=[];for(var k=Math.max(0,i-6);k<=i;k++){if(sc[k]!=null)w.push(sc[k]);}return w.length?Math.round(mean(w)):null;});
+      CHARTS.push(new Chart(cv,{data:{labels:labels,datasets:[
+        {type:"bar",label:"score",data:sc,backgroundColor:rowsB.map(function(d){return C[d.band];}),borderRadius:3,order:2},
+        {type:"line",label:"7-day avg",data:scRoll,borderColor:C.ink,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.3,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{min:0,max:100}}},LEG))}));})();
 
     // resting HR (360HP only) — bars with dotted rolling avg + ±1SD band, gaps where none
     var hasRhr=hpRHR.filter(function(v){return v!=null;}).length>=2;
