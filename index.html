@@ -163,6 +163,22 @@
 
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
   var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
+  var K_TRAINDRAFT="readiness_train_draft_v1"; // auto-saved set values so backgrounding can't lose them
+  // draft key = week||day||exercise; stores {w:[4 weights], v:[4 vels], done:bool}
+  function draftKey(week,day,exName){ return week+"||"+day+"||"+exName; }
+  function getDraft(week,day,exName){ var all=getJSON(K_TRAINDRAFT,{}); return all[draftKey(week,day,exName)]||null; }
+  function saveDraft(week,day,exName,patch){
+    try{ var all=getJSON(K_TRAINDRAFT,{}); var k=draftKey(week,day,exName);
+      all[k]=Object.assign({w:["","","",""],v:["","","",""],done:false}, all[k]||{}, patch);
+      setJSON(K_TRAINDRAFT,all);
+    }catch(e){}
+  }
+  function clearDraftFor(week,day){
+    try{ var all=getJSON(K_TRAINDRAFT,{}); var pre=week+"||"+day+"||";
+      Object.keys(all).forEach(function(k){ if(k.indexOf(pre)===0) delete all[k]; });
+      setJSON(K_TRAINDRAFT,all);
+    }catch(e){}
+  }
   var K_TOURN="readiness_tournament_v1", K_LOGHIST="readiness_loghist_v1", K_TRAVEL="readiness_travel_v1";
   var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
   var K_NOTES="readiness_notes_v1";       // per-date free-text notes
@@ -2154,12 +2170,21 @@
       var inputs=[]; var vels=[];
       var inpCss="padding:9px 6px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;text-align:center;width:100%;";
       var prevCss="padding:5px 4px;border-radius:6px;background:"+C.panel+";border:1px dashed "+C.line+";color:"+C.muted+";font-size:12px;text-align:center;width:100%;font-variant-numeric:tabular-nums;";
+      var exDraft=getDraft(wk.name, day.label||("Day "+(sel.d+1)), ex.name);
       for(var s=0;s<4;s++){
         var col=document.createElement("div");col.style.cssText="display:flex;flex-direction:column;gap:5px;";
         var slab=document.createElement("div");slab.style.cssText="font-size:10px;color:"+C.muted+";text-align:center;letter-spacing:0.04em;";slab.textContent="Set "+(s+1);
-        var inp=document.createElement("input");inp.type="text";inp.inputMode="decimal";inp.placeholder="kg";
-        inp.value=(ex.vals&&ex.vals[s])?ex.vals[s]:"";inp.style.cssText=inpCss;
+        var inp=document.createElement("input");inp.type="text";inp.setAttribute("inputmode","text");inp.autocapitalize="characters";inp.placeholder="kg or X";
+        // prefer a saved draft (survives app backgrounding), else the sheet's prefilled value
+        var draftW=(exDraft&&exDraft.w&&exDraft.w[s]!=null&&exDraft.w[s]!=="")?exDraft.w[s]:null;
+        inp.value=draftW!=null?draftW:((ex.vals&&ex.vals[s])?ex.vals[s]:"");inp.style.cssText=inpCss;
         var vel=document.createElement("input");vel.type="text";vel.inputMode="decimal";vel.placeholder="m/s";
+        var draftV=(exDraft&&exDraft.v&&exDraft.v[s])?exDraft.v[s]:"";
+        if(draftV) vel.value=draftV;
+        (function(si,exName){
+          inp.addEventListener("input",function(){ var d=getDraft(wk.name,day.label||("Day "+(sel.d+1)),exName)||{w:["","","",""],v:["","","",""]}; d.w=d.w||["","","",""]; d.w[si]=inp.value; saveDraft(wk.name,day.label||("Day "+(sel.d+1)),exName,{w:d.w}); });
+          vel.addEventListener("input",function(){ var d=getDraft(wk.name,day.label||("Day "+(sel.d+1)),exName)||{w:["","","",""],v:["","","",""]}; d.v=d.v||["","","",""]; d.v[si]=vel.value; saveDraft(wk.name,day.label||("Day "+(sel.d+1)),exName,{v:d.v}); });
+        })(s, ex.name);
         vel.style.cssText=inpCss+"border-color:"+C.glow+"44;";
         // previous-time read-only cells (weight then velocity) for this set
         var pw=(prev&&prev.weights&&prev.weights[s])?prev.weights[s]:"";
@@ -2230,6 +2255,7 @@
           // keep it from growing unbounded — last ~400 exercise-logs
           if(hist.length>400) hist=hist.slice(hist.length-400);
           setJSON(K_LOGHIST,hist);
+          clearDraftFor(wk.name, day.label||("Day "+(sel.d+1))); // logged — drop the auto-saved draft
           alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");
         }
         else{gymStatus={state:"err",msg:res.error};alert("Couldn't save: "+res.error);}
