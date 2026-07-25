@@ -174,13 +174,14 @@
   var _teamSynced={}, _teamUser=null;
   function teamConfigured(){ return !!_teamSB; }
   async function teamRefreshUser(){ if(!_teamSB) return null; try{ var r=await _teamSB.auth.getSession(); _teamUser=r.data.session?r.data.session.user:null; }catch(e){ _teamUser=null; } return _teamUser; }
-  async function teamSignIn(email){
-    if(!_teamSB){ alert("Team sync isn't set up yet."); return; }
-    if(!email){ return; }
+  async function teamSignIn(email, password){
+    if(!_teamSB){ alert("Team sync isn't set up yet."); return false; }
+    if(!email||!password){ return false; }
     try{
-      var { error } = await _teamSB.auth.signInWithOtp({ email:email, options:{ emailRedirectTo: window.location.href } });
-      alert(error ? error.message : "Check your email for a one-tap sign-in link, then reopen the app.");
-    }catch(e){ alert("Couldn't send the link: "+e.message); }
+      var { error } = await _teamSB.auth.signInWithPassword({ email:email, password:password });
+      if(error){ alert(error.message); return false; }
+      await teamRefreshUser(); return true;
+    }catch(e){ alert("Sign-in failed: "+e.message); return false; }
   }
   async function teamSignOut(){ if(_teamSB){ try{ await _teamSB.auth.signOut(); }catch(e){} } _teamUser=null; render(false); }
   async function syncToTeam(model){
@@ -2248,13 +2249,15 @@
             row.appendChild(sync);row.appendChild(out);tsCard.appendChild(row);
             syncToTeam(fmodel); // auto-sync on open when signed in
           } else {
-            tsSub.textContent="Sign in once to start sharing your daily scores with your team. They only ever see what you sync.";
-            var f=document.createElement("div");f.style.cssText="display:flex;gap:8px;";
-            var inp=document.createElement("input");inp.type="email";inp.inputMode="email";inp.placeholder="your email";
-            inp.style.cssText="flex:1;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:10px;color:"+C.ink+";font-size:15px;";
-            var go=document.createElement("button");go.className="btn btn-primary";go.style.cssText="padding:10px 16px;font-size:13px;white-space:nowrap;";go.textContent="Sign in";
-            go.onclick=function(){ teamSignIn(inp.value.trim()); };
-            f.appendChild(inp);f.appendChild(go);tsCard.appendChild(f);
+            tsSub.textContent="Sign in to start sharing your daily scores with your team. They only ever see what you sync.";
+            var f=document.createElement("div");f.style.cssText="display:flex;flex-direction:column;gap:8px;";
+            var inp=document.createElement("input");inp.type="email";inp.inputMode="email";inp.autocomplete="username";inp.placeholder="your email";
+            inp.style.cssText="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:11px;color:"+C.ink+";font-size:15px;";
+            var pw=document.createElement("input");pw.type="password";pw.autocomplete="current-password";pw.placeholder="password";
+            pw.style.cssText="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:11px;color:"+C.ink+";font-size:15px;";
+            var go=document.createElement("button");go.className="btn btn-primary";go.style.cssText="padding:11px 16px;font-size:14px;";go.textContent="Sign in";
+            go.onclick=async function(){ go.textContent="Signing in\u2026"; var ok=await teamSignIn(inp.value.trim(), pw.value); go.textContent="Sign in"; if(ok) render(false); };
+            f.appendChild(inp);f.appendChild(pw);f.appendChild(go);tsCard.appendChild(f);
           }
         });
         body.appendChild(tsCard);
