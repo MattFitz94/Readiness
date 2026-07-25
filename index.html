@@ -16,6 +16,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&display=swap" rel="stylesheet" />
 
 <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
   :root{ color-scheme:dark; }
@@ -161,6 +162,48 @@
       var n=getJSON(K_NOTES,{});
       if(txt&&txt.trim()) n[iso]=txt.trim(); else delete n[iso];
       setJSON(K_NOTES,n);
+    }catch(e){}
+  }
+
+  // ===== TEAM SYNC — pushes your daily readiness up to Supabase for your team =====
+  // Paste your two Supabase values here (same ones the team page uses).
+  var TEAM_SUPABASE_URL = "Phttps://etywwgtydhvnqxsuugty.supabase.co/rest/v1/";
+  var TEAM_SUPABASE_ANON_KEY = "sb_publishable_tpiJR6llKLVKdczfktOy5w_QE024iVa";
+  var _teamSB = (window.supabase && TEAM_SUPABASE_URL.indexOf("PASTE")<0)
+    ? window.supabase.createClient(TEAM_SUPABASE_URL, TEAM_SUPABASE_ANON_KEY) : null;
+  var _teamSynced={}, _teamUser=null;
+  function teamConfigured(){ return !!_teamSB; }
+  async function teamRefreshUser(){ if(!_teamSB) return null; try{ var r=await _teamSB.auth.getSession(); _teamUser=r.data.session?r.data.session.user:null; }catch(e){ _teamUser=null; } return _teamUser; }
+  async function teamSignIn(email){
+    if(!_teamSB){ alert("Team sync isn't set up yet."); return; }
+    if(!email){ return; }
+    try{
+      var { error } = await _teamSB.auth.signInWithOtp({ email:email, options:{ emailRedirectTo: window.location.href } });
+      alert(error ? error.message : "Check your email for a one-tap sign-in link, then reopen the app.");
+    }catch(e){ alert("Couldn't send the link: "+e.message); }
+  }
+  async function teamSignOut(){ if(_teamSB){ try{ await _teamSB.auth.signOut(); }catch(e){} } _teamUser=null; render(false); }
+  async function syncToTeam(model){
+    if(!_teamSB) return;
+    try{
+      var r=await _teamSB.auth.getSession(); var session=r.data.session; if(!session) return;
+      var rows=(model||[]).filter(function(d){return d.has&&d.iso;}).map(function(d){
+        return { day:d.iso, score:d.score100!=null?Math.round(d.score100):null,
+          band:d.band==="yellow"?"amber":d.band,
+          action:d.band==="green"?"Push":d.band==="yellow"?"Moderate":"Recover",
+          confidence:d.confidence||null, hrv:d.hrv!=null?d.hrv:null, hrv_base:d.hBase!=null?d.hBase:null,
+          rhr:d.rhr!=null?d.rhr:null, rhr_base:d.rBase!=null?d.rBase:null,
+          sleep_hours:d.o_sleephrs!=null?d.o_sleephrs:null, sleep_score:d.o_sleepscore!=null?d.o_sleepscore:null,
+          subjective:d.hp_subjective!=null?d.hp_subjective:null, objective:d.hp_objective!=null?d.hp_objective:null,
+          temp_dev:d.o_tempdev!=null?d.o_tempdev:null, tournament:!!d.tourn, travel:d.travel||"",
+          reasons:d.reasons||[], raw:{hrvSrc:d.hrvSrc,roll7:d.roll7,roll30:d.roll30,comp:d.comp},
+          updated_at:new Date().toISOString() };
+      });
+      var changed=rows.filter(function(x){ var sig=x.day+"|"+x.score+"|"+x.band+"|"+(x.reasons?x.reasons.length:0);
+        if(_teamSynced[x.day]===sig) return false; _teamSynced[x.day]=sig; return true; });
+      if(!changed.length) return;
+      var { error } = await _teamSB.from("daily_readiness").upsert(changed,{onConflict:"day"});
+      if(!error){ set("readiness_team_lastsync", String(Date.now())); }
     }catch(e){}
   }
 
@@ -2186,6 +2229,36 @@
       var xnote=document.createElement("div");xnote.className="cnote";xnote.style.cssText="text-align:center;margin-top:-4px;color:"+C.muted+";";
       xnote.textContent="Export saves the parts that only exist in this app \u2014 your readiness scores, tournament/travel flags and bar velocities.";
       body.appendChild(xnote);
+
+      // ---- Team sync ----
+      if(teamConfigured()){
+        var tsCard=document.createElement("div");tsCard.className="card";tsCard.style.marginTop="14px";
+        var tsHead=document.createElement("div");tsHead.style.cssText="font-size:13px;font-weight:650;margin-bottom:4px;";tsHead.textContent="Team sync";
+        var tsSub=document.createElement("div");tsSub.className="ssrc";tsSub.style.cssText="color:"+C.muted+";margin-bottom:10px;line-height:1.4;";
+        tsCard.appendChild(tsHead);tsCard.appendChild(tsSub);
+        teamRefreshUser().then(function(u){
+          if(u){
+            var last=get("readiness_team_lastsync");
+            var lastTxt=last?("last synced "+new Date(parseInt(last,10)).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})):"signed in \u2014 syncing on open";
+            tsSub.textContent="Your scores are shared with your team. "+lastTxt+".";
+            var row=document.createElement("div");row.className="btnrow";
+            var sync=document.createElement("button");sync.className="btn btn-primary";sync.style.cssText="padding:8px 16px;font-size:13px;";sync.textContent="Sync now";
+            sync.onclick=function(){ sync.textContent="Syncing\u2026"; syncToTeam(fmodel).then(function(){ sync.textContent="Synced \u2713"; setTimeout(function(){render(false);},900); }); };
+            var out=document.createElement("button");out.className="btn btn-ghost";out.style.cssText="padding:8px 16px;font-size:13px;";out.textContent="Sign out";out.onclick=function(){teamSignOut();};
+            row.appendChild(sync);row.appendChild(out);tsCard.appendChild(row);
+            syncToTeam(fmodel); // auto-sync on open when signed in
+          } else {
+            tsSub.textContent="Sign in once to start sharing your daily scores with your team. They only ever see what you sync.";
+            var f=document.createElement("div");f.style.cssText="display:flex;gap:8px;";
+            var inp=document.createElement("input");inp.type="email";inp.inputMode="email";inp.placeholder="your email";
+            inp.style.cssText="flex:1;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:10px;color:"+C.ink+";font-size:15px;";
+            var go=document.createElement("button");go.className="btn btn-primary";go.style.cssText="padding:10px 16px;font-size:13px;white-space:nowrap;";go.textContent="Sign in";
+            go.onclick=function(){ teamSignIn(inp.value.trim()); };
+            f.appendChild(inp);f.appendChild(go);tsCard.appendChild(f);
+          }
+        });
+        body.appendChild(tsCard);
+      }
     }
     else if(TAB==="trends") buildTrends(body,fmodel);
     else if(TAB==="compare") buildCompare(body,fmodel);
