@@ -179,6 +179,25 @@
       setJSON(K_TRAINDRAFT,all);
     }catch(e){}
   }
+  // Snapshot EVERY training input to disk right now. Called on visibilitychange/pagehide —
+  // the events iOS fires when you leave the app — so nothing is lost even if it suspends fast.
+  function snapshotTrainingNow(){
+    try{
+      var ctx=window.__trainCtx; if(!ctx||!ctx.logInputs||!ctx.logInputs.length) return;
+      ctx.logInputs.forEach(function(li){
+        var w=["","","",""], v=["","","",""];
+        for(var i=0;i<4;i++){ if(li.inputs&&li.inputs[i]) w[i]=li.inputs[i].value||""; if(li.vels&&li.vels[i]) v[i]=li.vels[i].value||""; }
+        // only write if something was entered, so we don't clobber with blanks
+        if(w.join("")!==""||v.join("")!==""){ saveDraft(ctx.week, ctx.day, li.exercise, {w:w, v:v}); }
+      });
+    }catch(e){}
+  }
+  if(typeof document!=="undefined" && !window.__trainSaveHooked){
+    window.__trainSaveHooked=true;
+    document.addEventListener("visibilitychange", function(){ if(document.visibilityState==="hidden") snapshotTrainingNow(); });
+    window.addEventListener("pagehide", snapshotTrainingNow);
+    window.addEventListener("blur", snapshotTrainingNow);
+  }
   var K_TOURN="readiness_tournament_v1", K_LOGHIST="readiness_loghist_v1", K_TRAVEL="readiness_travel_v1";
   var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
   var K_NOTES="readiness_notes_v1";       // per-date free-text notes
@@ -2137,6 +2156,8 @@
     }
 
     var logInputs=[]; // {exercise, inputs:[4], doneEl}
+    // expose for the global "save on leave" handler (iOS can suspend the app without firing input)
+    window.__trainCtx={ week:wk.name, day:day.label||("Day "+(sel.d+1)), logInputs:logInputs };
     (day.exercises||[]).forEach(function(ex){
       var c=document.createElement("div");c.className="card";
 
@@ -2849,9 +2870,17 @@
           }
         }
       }).catch(function(){ render(false); });
-      // keep in step with auth changes (sign in/out, token refresh)
+      // keep in step with auth changes — but ONLY on real sign-in/out, NOT on the routine
+      // token refresh that fires every time you return to the app (that was wiping typed inputs).
       if(_teamSB && _teamSB.auth && _teamSB.auth.onAuthStateChange){
-        _teamSB.auth.onAuthStateChange(function(){
+        var _lastUid = _teamUser ? _teamUser.id : null;
+        _teamSB.auth.onAuthStateChange(function(event, session){
+          if(event==="TOKEN_REFRESHED" || event==="INITIAL_SESSION") return; // no re-render on these
+          var newUid = session && session.user ? session.user.id : null;
+          if(newUid === _lastUid) return; // same user — nothing changed, don't rebuild
+          _lastUid = newUid;
+          // snapshot any in-progress training entry before we rebuild
+          try{ snapshotTrainingNow(); }catch(e){}
           teamRefreshUser().then(function(){
             if(isViewer()){ loadViewerData().then(function(){ render(false); }); }
             else { render(false); }
