@@ -2410,13 +2410,62 @@
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
   var TABS=[["today","Today"],["history","History"],["training","Training"],["physio","Physio"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"],["faq","FAQ"]];
 
-  function render(savedFlash){
-    var keepScroll=(typeof window!=="undefined"&&window.pageYOffset)?window.pageYOffset:0;
+  // Full-screen login gate. Shown when team sync is configured, nobody's signed in,
+  // and this device has no local data of its own (i.e. a team member's phone).
+  // The owner's phone has local data, so it never sees this — the app just opens.
+  var FORCE_LOGIN=false; // set true after a signed-in viewer signs out, to show login again
+  function showLoginScreen(errMsg){
+    app.innerHTML="";
+    var wrap=document.createElement("div");wrap.style.cssText="min-height:80vh;display:flex;flex-direction:column;justify-content:center;gap:16px;padding:0 4px;max-width:420px;margin:0 auto;";
+    wrap.innerHTML='<div style="width:52px;height:52px;border-radius:14px;background:radial-gradient(120% 120% at 30% 20%,#0f3a44,#071f27);border:1px solid '+C.line+';display:grid;place-items:center;font-family:\'Fraunces\',serif;font-weight:600;color:'+C.glow2+';font-size:24px;">R</div>'+
+      '<div style="font-family:\'Fraunces\',serif;font-size:30px;font-weight:600;letter-spacing:-0.01em;">Readiness</div>'+
+      '<div style="font-size:14px;color:'+C.muted+';line-height:1.5;margin-top:-8px;">Matt Fitzpatrick\u2019s performance readiness. Sign in with the email and password you were given.</div>';
+    var f=document.createElement("div");f.style.cssText="display:flex;flex-direction:column;gap:10px;margin-top:6px;";
+    var el=document.createElement("div");el.style.cssText="font-size:12px;color:"+C.muted+";";el.textContent="Email";
+    var inp=document.createElement("input");inp.type="email";inp.inputMode="email";inp.autocomplete="username";inp.placeholder="you@example.com";
+    inp.style.cssText="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:11px;padding:13px 14px;color:"+C.ink+";font-size:16px;";
+    var pl=document.createElement("div");pl.style.cssText="font-size:12px;color:"+C.muted+";margin-top:4px;";pl.textContent="Password";
+    var pw=document.createElement("input");pw.type="password";pw.autocomplete="current-password";pw.placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022";
+    pw.style.cssText="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:11px;padding:13px 14px;color:"+C.ink+";font-size:16px;";
+    var go=document.createElement("button");go.className="btn btn-primary";go.style.cssText="padding:14px;font-size:15px;margin-top:6px;";go.textContent="Sign in";
+    var msg=document.createElement("div");msg.style.cssText="font-size:13px;color:"+C.amber+";min-height:18px;line-height:1.4;";
+    if(errMsg){ msg.textContent=errMsg; }
+    go.onclick=async function(){
+      if(!inp.value.trim()||!pw.value){ msg.style.color=C.amber; msg.textContent="Enter your email and password."; return; }
+      go.textContent="Signing in\u2026"; msg.style.color=C.muted; msg.textContent="";
+      var ok=await teamSignIn(inp.value.trim(), pw.value);
+      go.textContent="Sign in";
+      if(ok){ FORCE_LOGIN=false; if(isViewer()){ await loadViewerData(); } render(false); }
+      else { msg.style.color=C.amber; msg.textContent="That didn\u2019t work \u2014 check your email and password, or ask Matt to confirm your access."; }
+    };
+    f.appendChild(el);f.appendChild(inp);f.appendChild(pl);f.appendChild(pw);f.appendChild(go);f.appendChild(msg);
+    wrap.appendChild(f);
+    // Escape hatch for Matt on a brand-new device: reveals a note that he signs in with his
+    // OWNER login (same email+password above). It is NOT a free bypass — pressing it just
+    // explains that the owner also signs in here; a team member gains nothing from it.
+    var esc=document.createElement("button");esc.className="btn btn-ghost";esc.style.cssText="margin-top:18px;font-size:12.5px;padding:10px;";esc.textContent="Setting up as Matt on a new device?";
+    var escNote=document.createElement("div");escNote.style.cssText="display:none;font-size:12.5px;color:"+C.muted+";line-height:1.5;margin-top:8px;padding:10px 12px;background:"+C.panel+";border:1px solid "+C.line+";border-radius:10px;";
+    escNote.innerHTML="Sign in above with your owner email and password. Once you're in, use <b>Import 360HP CSV</b> on the Today tab to load your data on this device.";
+    esc.onclick=function(){ escNote.style.display = escNote.style.display==="none" ? "block" : "none"; };
+    wrap.appendChild(esc);wrap.appendChild(escNote);
+    app.appendChild(wrap);
+  }
+
+  function render(savedFlash){    var keepScroll=(typeof window!=="undefined"&&window.pageYOffset)?window.pageYOffset:0;
     var viewer=isViewer();
     var arr, model;
     if(viewer && VIEWER_MODEL){ model=VIEWER_MODEL; arr=VIEWER_MODEL; }
     else { arr=fuse(); model=arr.length?analyze(arr):[]; }
     var today=model.length?model[model.length-1]:null;
+
+    // LOGIN GATE: show a login screen first for anyone who isn't signed in and has no local data.
+    // The owner's own device has local data, so it skips this and opens normally. A team member's
+    // device has neither, so they must sign in. Signing in as owner (fresh device) also passes.
+    if(teamConfigured() && !_teamUser && !viewer && (!today || !today.has)){
+      showLoginScreen();
+      return;
+    }
+
     app.innerHTML="";
 
     var head=document.createElement("div");head.className="head";
@@ -2759,19 +2808,22 @@
 
   // initial render, then auto-sync Oura once on load if we have a URL
   try{
-    render(false);
-    // If a team member is already signed in on this device, detect role, pull Matt's
-    // synced data, and re-render as a viewer. Owners/not-signed-in keep the local flow.
     if(teamConfigured()){
+      // Resolve auth BEFORE first paint so signed-in users (owner or viewer) skip the login gate,
+      // and only genuine not-signed-in team members see it.
       teamRefreshUser().then(function(){
         if(isViewer()){
           loadViewerData().then(function(){ render(false); });
-        } else if(_teamUser){
-          // owner signed in — sync up on load
-          try{ syncToTeam(analyze(fuse())); }catch(e){}
+        } else {
+          render(false);
+          if(_teamUser){ try{ syncToTeam(analyze(fuse())); }catch(e){} }
+          if(!isViewer() && WORKER_URL && WORKER_URL.indexOf("http")===0){
+            ouraStatus={state:"loading",msg:""};
+            fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); });
+          }
         }
-      });
-      // keep in step with auth changes (sign in/out from another tab, token refresh)
+      }).catch(function(){ render(false); });
+      // keep in step with auth changes (sign in/out, token refresh)
       if(_teamSB && _teamSB.auth && _teamSB.auth.onAuthStateChange){
         _teamSB.auth.onAuthStateChange(function(){
           teamRefreshUser().then(function(){
@@ -2780,11 +2832,13 @@
           });
         });
       }
-    }
-    if(!isViewer() && WORKER_URL && WORKER_URL.indexOf("http")===0){
-      ouraStatus={state:"loading",msg:""};
-      // reflect loading state without full re-render flash: only if today exists
-      fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); });
+    } else {
+      // no team configured — just the owner's local app
+      render(false);
+      if(WORKER_URL && WORKER_URL.indexOf("http")===0){
+        ouraStatus={state:"loading",msg:""};
+        fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); });
+      }
     }
   }catch(err){ fail("Something went wrong starting the app: "+err.message); }
 })();
