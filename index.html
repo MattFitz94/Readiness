@@ -2613,7 +2613,41 @@
     sync.appendChild(refresh);
     app.appendChild(sync);
 
-    // no data yet -> onboarding, no tabs
+    // no data yet -> onboarding, no tabs — BUT never show this to a signed-in team member.
+    // Anyone signed in who is NOT confirmed as the owner should see data or a loading/blocked
+    // state, never the owner's "import CSV" screen. This covers the case where the role lookup
+    // is still resolving or failed.
+    var isOwnerRole = (_teamRole==="owner");
+    var signedInNotOwner = !!(_teamUser && !isOwnerRole);
+    if((!today || !today.has) && signedInNotOwner){
+      var lp=document.createElement("div");lp.className="panel";
+      if(!VIEWER_LOADED && _teamRole && _teamRole!=="owner"){
+        // recognised team member, data still loading
+        lp.innerHTML='<div class="ctitle">Loading Matt\u2019s data\u2026</div>'+
+          '<p class="cnote" style="font-size:14px">Signed in as '+(roleLabel()||"team")+'. Pulling the latest readiness data \u2014 one moment.</p>';
+        app.appendChild(lp);
+        loadViewerData().then(function(){ VIEWER_LOADED=true; render(false); });
+      } else if(_teamRole && _teamRole!=="owner"){
+        // recognised, loaded, but empty
+        lp.innerHTML='<div class="ctitle">No data yet</div>'+
+          '<p class="cnote" style="font-size:14px">You\u2019re signed in as '+(roleLabel()||"team")+', but there\u2019s no readiness data to show yet. It\u2019ll appear once Matt syncs. Nothing for you to set up.</p>';
+        app.appendChild(lp);
+        var so=document.createElement("button");so.className="btn btn-ghost";so.style.marginTop="10px";so.textContent="Sign out";so.onclick=function(){teamSignOut();};lp.appendChild(so);
+      } else {
+        // signed in but NO role found — email not in team_members, or not readable (RLS). Do NOT
+        // dump them on the import screen; tell them plainly and offer to retry / sign out.
+        lp.innerHTML='<div class="ctitle">Access not set up yet</div>'+
+          '<p class="cnote" style="font-size:14px">You\u2019re signed in, but this account isn\u2019t on Matt\u2019s team list yet (or access is still syncing). Ask Matt to confirm your email is added. This is not something you can fix by importing data.</p>';
+        app.appendChild(lp);
+        var rb=document.createElement("button");rb.className="btn btn-primary";rb.style.cssText="margin-top:10px;padding:10px 16px;";rb.textContent="Retry";rb.onclick=function(){ teamRefreshUser().then(function(){ if(isViewer()){ loadViewerData().then(function(){VIEWER_LOADED=true;render(false);}); } else { render(false); } }); };
+        var so2=document.createElement("button");so2.className="btn btn-ghost";so2.style.cssText="margin-top:10px;margin-left:8px;padding:10px 16px;";so2.textContent="Sign out";so2.onclick=function(){teamSignOut();};
+        lp.appendChild(rb);lp.appendChild(so2);
+      }
+      var footV=document.createElement("div");footV.className="foot";footV.textContent="Signal, not diagnosis.";app.appendChild(footV);
+      return;
+    }
+
+    // no data yet -> onboarding, no tabs (owner only, on a device with no data)
     if(!today || !today.has){
       var p=document.createElement("div");p.className="panel";
       p.innerHTML='<div class="ctitle">Get started</div>'+
