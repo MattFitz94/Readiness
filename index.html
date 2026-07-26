@@ -164,6 +164,7 @@
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
   var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
   var K_TRAINDRAFT="readiness_train_draft_v1"; // auto-saved set values so backgrounding can't lose them
+  var K_SCORELOCK="readiness_scorelock_v1"; // {iso: {score,band,comp,confidence}} — freezes the morning score for the day
   // draft key = week||day||exercise; stores {w:[4 weights], v:[4 vels], done:bool}
   function draftKey(week,day,exName){ return week+"||"+day+"||"+exName; }
   function getDraft(week,day,exName){ var all=getJSON(K_TRAINDRAFT,{}); return all[draftKey(week,day,exName)]||null; }
@@ -1117,6 +1118,26 @@
       // band -> keep the app's yellow naming
       var band = res.band==="amber" ? "yellow" : res.band;
       var score100 = res.score!=null ? res.score : 0;
+
+      // FREEZE today's score: a readiness score is a morning reading and must not drift during
+      // the day as Oura re-syncs or the baseline shifts. The first score computed for a given
+      // date is locked and reused all day. (Past days are historical and never locked here.)
+      var _todayIso=new Date().toISOString().slice(0,10);
+      if(row.iso===_todayIso && res.score!=null){
+        try{
+          var locks=getJSON(K_SCORELOCK,{});
+          if(locks[_todayIso] && locks[_todayIso].score!=null){
+            // reuse the locked morning values
+            score100=locks[_todayIso].score;
+            if(locks[_todayIso].band) band=locks[_todayIso].band;
+          } else {
+            // first compute of the day — lock it
+            locks={}; // keep only today's lock, drop old dates
+            locks[_todayIso]={score:score100, band:band, comp:(res.comp!=null?res.comp:0), confidence:(res.confidence?res.confidence.level:"low")};
+            setJSON(K_SCORELOCK,locks);
+          }
+        }catch(e){}
+      }
 
       return Object.assign({},row,{
         hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
@@ -2590,7 +2611,9 @@
     fileInput.addEventListener("change",function(ev){var f=ev.target.files&&ev.target.files[0];if(!f)return;
       var rd=new FileReader();rd.onload=function(x){try{var p=parseCSV(x.target.result);
         if(!p.length||!("rMSSD" in p[0])){alert("That file doesn't look like a 360HP export \u2014 no rMSSD column found.");return;}
-        setJSON(K_ROWS,p);render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
+        setJSON(K_ROWS,p);
+        try{ var _lk=getJSON(K_SCORELOCK,{}); delete _lk[new Date().toISOString().slice(0,10)]; setJSON(K_SCORELOCK,_lk); }catch(e){} // new 360HP data = real morning reading, refresh today's locked score
+        render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
       rd.readAsText(f);});
     app.appendChild(fileInput);
 
