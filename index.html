@@ -16,8 +16,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
 <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
-<script src="config.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
   :root{ color-scheme:dark; }
@@ -260,13 +258,15 @@
   // Paste your two Supabase values here (same ones the team page uses).
   // Keys live in a separate config.js you set up ONCE (so app updates never touch them).
   // config.js should contain:  window.TEAM_CONFIG = { url:"https://xx: not the /rest/v1/ one", key:"your-publishable-key" };
-  var TEAM_SUPABASE_URL = (window.TEAM_CONFIG && window.TEAM_CONFIG.url) || "PASTE_YOUR_PROJECT_URL_HERE";
-  var TEAM_SUPABASE_ANON_KEY = (window.TEAM_CONFIG && window.TEAM_CONFIG.key) || "PASTE_YOUR_ANON_KEY_HERE";
-  var _teamSB = (window.supabase && TEAM_SUPABASE_URL.indexOf("PASTE")<0)
-    ? window.supabase.createClient(TEAM_SUPABASE_URL, TEAM_SUPABASE_ANON_KEY) : null;
+  // ===== SOLO MODE: team sharing / login removed — this is a personal single-user app now. =====
+  // Forcing the team client off makes every login gate, sync button and viewer path disappear,
+  // because they're all guarded by teamConfigured()/isViewer(). The app runs in pure local mode.
+  var TEAM_SUPABASE_URL = "";
+  var TEAM_SUPABASE_ANON_KEY = "";
+  var _teamSB = null;
   var _teamSynced={}, _teamUser=null;
-  function teamConfigured(){ return !!_teamSB; }
-  async function teamRefreshUser(){ if(!_teamSB) return null; try{ var r=await _teamSB.auth.getSession(); _teamUser=r.data.session?r.data.session.user:null; }catch(e){ _teamUser=null; } await teamRefreshRole(); return _teamUser; }
+  function teamConfigured(){ return false; }
+  async function teamRefreshUser(){ _teamUser=null; return null; }
   // VIEWER ROLE — controls what this person can do in the app.
   // owner = full (Matt) · physio = view + notes · trainer = view + gym log · staff = view only · null = not signed in (treat as owner/local)
   var _teamRole=null;
@@ -2044,24 +2044,6 @@
       "When both have HRV, the app uses 360HP as the anchor and Oura as a cross-check. Missing a source just means those rings show \u201c\u2014\u201d that day; the score still works from what's there."
     );
 
-    // --- TEAM SHARING ---
-    section("Sharing with your team");
-    card("Your team log into <b>this same app</b> and see everything you see \u2014 read-only. Physios can add session notes (Physio tab); your trainer gets your full Training tab to log sessions; everyone else is view-only. You control who's in and can remove anyone instantly.");
-    qa("Step 1 \u2014 Create their login",
-      "In Supabase \u2192 <b>Authentication \u2192 Users \u2192 Add user \u2192 Create new user</b>. Enter their email and a password you choose, tick <b>Auto Confirm User</b>, and create. (Auto Confirm means no confirmation email \u2014 they can log in straight away.)",true);
-    qa("Step 2 \u2014 Give them a role",
-      "In Supabase \u2192 <b>SQL Editor</b> \u2192 New query, run this (swap in their details and pick the role \u2014 physio / trainer / staff):<br><br>"+
-      "<code style='display:block;background:"+C.panel2+";padding:10px;border-radius:8px;font-size:12px;color:"+C.ink+";overflow-x:auto;'>insert into team_members (email, full_name, role)<br>values ('them@example.com', 'Their Name', 'physio');</code>");
-    qa("Step 3 \u2014 Send them the app",
-      "Give them three things: the app link (your GitHub Pages URL), their email, and the password you set. On their phone they open the link, and on the login screen sign in with their email + password. They go straight to your data \u2014 no account creation, no CSV, nothing to set up on their end. (Their role is matched by email automatically \u2014 no linking step needed.)");
-    qa("What each role can do",
-      "<b>Physio</b> \u2014 sees everything, adds session notes in the Physio tab.<br><b>Trainer</b> \u2014 sees everything, gets your full Training tab to log sessions.<br><b>Staff / head of performance</b> \u2014 sees everything, view-only.<br>Only you (owner) can import data, edit flags, or clear anything.");
-    qa("If a team member lands on your \u201cimport CSV\u201d screen",
-      "That means the app couldn't read their role. Check two things in Supabase: (1) their email in <b>team_members</b> is spelled EXACTLY like their login email, and (2) their row's <b>active</b> is true. Run <code>select email, role, active from team_members;</code> to see. The email match is case-insensitive, but a typo or extra space will break it.");
-    qa("Removing someone",
-      "In Supabase \u2192 SQL Editor, run:<br><br>"+
-      "<code style='display:block;background:"+C.panel2+";padding:10px;border-radius:8px;font-size:12px;color:"+C.ink+";overflow-x:auto;'>update team_members set active = false<br>where email = 'them@example.com';</code><br>They're locked out next time the app checks. Set it back to <code>true</code> to restore.");
-
     var end=document.createElement("div");end.style.cssText="height:20px;";container.appendChild(end);
   }
   function faqWeightRow(label,pct,col){
@@ -2373,6 +2355,96 @@
     saveWrap.appendChild(saveBtn);container.appendChild(saveWrap);
   }
 
+  // ---- export today's summary as a shareable PNG (drawn on a canvas, no libraries) ----
+  function exportTodayImage(today, btn){
+    try{
+      if(!today || !today.has){ alert("No reading yet today to export."); return; }
+      if(btn) btn.textContent="Creating\u2026";
+      var W=1080, H=1350, S=2; // portrait, 2x scale for crisp text
+      var cv=document.createElement("canvas"); cv.width=W*S; cv.height=H*S;
+      var x=cv.getContext("2d"); x.scale(S,S);
+      var band=today.band, bc=(band==="green"?C.green:band==="red"?C.red:C.amber);
+      // background gradient (ocean-night)
+      var g=x.createLinearGradient(0,0,0,H); g.addColorStop(0,"#062430"); g.addColorStop(0.55,C.bg); g.addColorStop(1,"#031016");
+      x.fillStyle=g; x.fillRect(0,0,W,H);
+      // header
+      x.textAlign="left";
+      x.fillStyle=C.ink; x.font="600 46px Fraunces, Georgia, serif"; x.fillText("Readiness", 70, 96);
+      x.fillStyle=C.muted; x.font="500 24px 'IBM Plex Mono', monospace";
+      var dstr=new Date(today.iso+"T00:00:00").toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"});
+      x.fillText(dstr.toUpperCase(), 70, 134);
+      // score ring
+      var cx=W/2, cy=430, r=175;
+      x.lineWidth=26; x.lineCap="round";
+      x.strokeStyle="#0E2A34"; x.beginPath(); x.arc(cx,cy,r,0,Math.PI*2); x.stroke();
+      var frac=Math.max(0.02,Math.min(1,(today.score100||0)/100));
+      x.strokeStyle=bc; x.shadowColor=bc; x.shadowBlur=34;
+      x.beginPath(); x.arc(cx,cy,r,-Math.PI/2, -Math.PI/2 + frac*Math.PI*2); x.stroke();
+      x.shadowBlur=0;
+      // score number + word
+      x.textAlign="center";
+      x.fillStyle=bc; x.font="600 150px Fraunces, Georgia, serif"; x.fillText(String(today.score100), cx, cy+42);
+      x.fillStyle=bc; x.font="600 30px 'IBM Plex Mono', monospace";
+      var word=(band==="green"?"READY":band==="red"?"RECOVER":"MODERATE");
+      x.fillText(word, cx, cy+108);
+      // action pill
+      var act=(band==="green"?"\u25b2 Push today":band==="red"?"\u25bc Recover today":"Moderate today");
+      x.font="600 30px Inter, Arial, sans-serif";
+      var pw=x.measureText(act).width+72, ph=64, px=cx-pw/2, py=cy+150;
+      roundRect(x,px,py,pw,ph,32); x.fillStyle=bc; x.fill();
+      x.fillStyle="#04141A"; x.fillText(act, cx, py+42);
+      // verdict text (wrapped)
+      x.fillStyle=C.muted; x.font="400 27px Inter, Arial, sans-serif";
+      var verdict=(today.reasons&&today.reasons[0]&&today.reasons[0].txt)?"":"";
+      var vtext=(band==="green"?"Recovered and holding above your normal \u2014 a good day to load.":band==="red"?"Signals are down \u2014 rest, mobility or light recovery today.":"Middle ground \u2014 technical or moderate work, leave max effort for a green day.");
+      wrapText(x, vtext, cx, cy+270, W-220, 38);
+      // metrics row
+      var metrics=[
+        ["HRV", today.hrv!=null?String(Math.round(today.hrv)):"\u2014", C.hrv],
+        ["Rest HR", today.rhr!=null?String(today.rhr):"\u2014", C.ink],
+        ["Subjective", today.hp_subjective!=null?(today.hp_subjective+"/10"):"\u2014", C.amber],
+        ["Oura", today.o_readiness!=null?String(today.o_readiness):"\u2014", C.green]
+      ];
+      var my=cy+430, cardW=(W-70*2-3*20)/4, mh=170;
+      for(var i=0;i<metrics.length;i++){
+        var mx=70+i*(cardW+20);
+        roundRect(x,mx,my,cardW,mh,18); x.fillStyle=C.panel; x.fill();
+        x.strokeStyle=C.line; x.lineWidth=1.5; roundRect(x,mx,my,cardW,mh,18); x.stroke();
+        x.textAlign="center";
+        x.fillStyle=C.muted; x.font="500 20px 'IBM Plex Mono', monospace"; x.fillText(metrics[i][0].toUpperCase(), mx+cardW/2, my+44);
+        x.fillStyle=metrics[i][2]; x.font="700 52px Inter, Arial, sans-serif"; x.fillText(metrics[i][1], mx+cardW/2, my+110);
+      }
+      // confidence + footer
+      x.textAlign="center";
+      x.fillStyle=C.muted; x.font="500 24px 'IBM Plex Mono', monospace";
+      x.fillText("Confidence: "+(today.confidence||"\u2014"), cx, my+mh+70);
+      x.fillStyle=C.muted; x.font="400 22px Inter, Arial, sans-serif";
+      wrapText(x, "Signal, not diagnosis. A morning read of recovery trend to inform how hard to train.", cx, my+mh+120, W-180, 32);
+
+      var name="readiness-"+today.iso+".png";
+      cv.toBlob(function(blob){
+        if(!blob){ alert("Couldn't create the image."); if(btn) btn.textContent="Export image"; return; }
+        var url=URL.createObjectURL(blob);
+        var a=document.createElement("a"); a.href=url; a.download=name;
+        document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(url); if(a.parentNode)a.parentNode.removeChild(a); },1500);
+        // iOS fallback: also show the image so it can be long-pressed -> Save/Share
+        showImagePreview(cv.toDataURL("image/png"), name);
+        if(btn) btn.textContent="Export image \u2713";
+        setTimeout(function(){ if(btn) btn.textContent="Export image"; },1800);
+      }, "image/png");
+    }catch(e){ alert("Couldn't create the image: "+e.message); if(btn) btn.textContent="Export image"; }
+  }
+  function roundRect(ctx,rx,ry,rw,rh,rad){ ctx.beginPath(); ctx.moveTo(rx+rad,ry); ctx.arcTo(rx+rw,ry,rx+rw,ry+rh,rad); ctx.arcTo(rx+rw,ry+rh,rx,ry+rh,rad); ctx.arcTo(rx,ry+rh,rx,ry,rad); ctx.arcTo(rx,ry,rx+rw,ry,rad); ctx.closePath(); }
+  function wrapText(ctx,text,cx,cy,maxW,lh){ var words=text.split(" "),line="",yy=cy; for(var i=0;i<words.length;i++){ var t=line+words[i]+" "; if(ctx.measureText(t).width>maxW && line){ ctx.fillText(line.trim(),cx,yy); line=words[i]+" "; yy+=lh; } else line=t; } ctx.fillText(line.trim(),cx,yy); }
+  function showImagePreview(dataURL,name){
+    var ov=document.createElement("div"); ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.94);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:14px;";
+    var msg=document.createElement("div"); msg.style.cssText="color:#DCEEF0;font-size:14px;text-align:center;max-width:340px;line-height:1.5;"; msg.textContent="Saved as "+name+". On iPhone, press and hold the image to Save or Share it.";
+    var img=document.createElement("img"); img.src=dataURL; img.style.cssText="max-width:100%;max-height:70vh;border-radius:14px;border:1px solid #123845;";
+    var cl=document.createElement("button"); cl.className="btn btn-primary"; cl.textContent="Done"; cl.style.cssText="padding:12px 28px;"; cl.onclick=function(){ if(ov.parentNode)ov.parentNode.removeChild(ov); };
+    ov.appendChild(msg); ov.appendChild(img); ov.appendChild(cl); document.body.appendChild(ov);
+  }
+
   // ---- export the data that ONLY exists in this app ----
   function exportMyData(model){
     try{
@@ -2542,7 +2614,7 @@
   var PREVTAB=null;
   var RANGE="14"; // date filter for chart tabs: 7 | 14 | 30 | 90 | 180 | all | custom (default 14d)
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
-  var TABS=[["today","Today"],["history","History"],["training","Training"],["physio","Physio"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"],["faq","FAQ"]];
+  var TABS=[["today","Today"],["history","History"],["training","Training"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"],["faq","FAQ"]];
 
   // Full-screen login gate. Shown when team sync is configured, nobody's signed in,
   // and this device has no local data of its own (i.e. a team member's phone).
@@ -2906,6 +2978,8 @@
       }
       var bx=document.createElement("button");bx.className="btn btn-ghost";bx.textContent="Export data";bx.onclick=function(){exportMyData(model);};
       btns.appendChild(bx);
+      var bimg=document.createElement("button");bimg.className="btn btn-ghost";bimg.textContent="Export image";bimg.onclick=function(){ exportTodayImage(today, bimg); };
+      btns.appendChild(bimg);
       if(canEditOwn()){
         var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){localStorage.removeItem(K_ROWS);localStorage.removeItem(K_OURA);localStorage.removeItem(K_OURATIME);render(false);}};
         btns.appendChild(b2);
@@ -2917,7 +2991,7 @@
         bk.onclick=function(){ backupEverything(model, bk); };
         bkRow.appendChild(bk);body.appendChild(bkRow);
         var xnote=document.createElement("div");xnote.className="cnote";xnote.style.cssText="text-align:center;margin-top:6px;color:"+C.muted+";line-height:1.5;";
-        xnote.innerHTML="<b>Back up everything</b> saves one dated file with the lot \u2014 your scores, all physio notes, all gym logs, your flags and velocities \u2014 from both this phone and the team database. Save it to Files or email it to yourself. Each backup is a full snapshot, so keeping a few gives you versioned history.<br><br>Export data is the lighter CSV of just this app's own data.";
+        xnote.innerHTML="<b>Export image</b> saves today\u2019s summary as a picture to share. <b>Export data</b> is a CSV of your scores. <b>Back up everything</b> saves one dated file with all your data \u2014 keep a few for versioned history.";
         body.appendChild(xnote);
       }
 
