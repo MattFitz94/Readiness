@@ -409,6 +409,7 @@
         days[iso].hp_diet=r.diet?parseFloat(r.diet):null;
         days[iso].hp_exercise=r.exercise?parseFloat(r.exercise):null;
         days[iso].hp_happiness=r.happiness?parseFloat(r.happiness):null;
+        days[iso].hp_filtered=(r.filtered!=null&&r.filtered!=="")?parseFloat(r.filtered):null;   // v2.1: artefact count
         days[iso].tags=(r.tags||"").trim(); days[iso].note=(r.note||"").trim();
       });
     }
@@ -440,529 +441,721 @@
   //  READINESS SIGNAL ENGINE v2  (ln rMSSD, SWC, per-source baselines, saturation,
   //  confidence-not-score for device disagreement, thin-data guards). Self-contained.
   // ============================================================================
+  // ============================================================================
+  //  READINESS SIGNAL ENGINE v2.1  (ln rMSSD, SWC, per-source baselines,
+  //  RHR residualised against HRV, personal saturation threshold, calendar-day
+  //  travel decay, artefact-aware HRV upside. Self-contained.)
+  // ============================================================================
   var RV2 = (function(){
-  const ENGINE_VERSION = 2;
+/* ============================================================================
+   READINESS ENGINE v2.1
+   ----------------------------------------------------------------------------
+   Patch release on v2. Output contract is UNCHANGED - the index.html adapter,
+   analyze(), and all tabs need no modification except passing one new optional
+   input field (hp_filtered).
 
-  const CONFIG = {
-    weights: {
-      hrvAcute:     0.30,
-      hrvChronic:   0.08,
-      hrvStability: 0.05,
-      subjective:   0.30,
-      rhr:          0.12,
-      sleep:        0.09,
-      ouraReady:    0.06
-    },
-    baselineDays:         7,
-    chronicDays:         30,
-    dispersionDays:      60,
-    minBaselineReadings:  4,
-    minDaysForSD:        14,
-    swcMultiplier:      0.5,
-    tanhSoftness:       2.0,
-    saturationZ:        1.5,
-    saturationRHR:       50,
-    rhrCouplingAmp:     1.30,
-    subjectiveRedFloor:   5.0,
-    subjectiveAmberFloor: 6.5,
-    deepSuppressionZ:    -2.0,
-    severeSuppressionZ:  -3.0,
-    tempFlagC:            0.5,
-    illnessRhrZ:          1.0,
-    illnessHrvZ:         -1.0,
-    travelDecay: {
-      short: [0.10, 0.05],
-      long:  [0.22, 0.14, 0.07, 0.03]
-    },
-    sleepDebtNights: 3,
-    sleepRegularityDays: 7,
-    bands: { green: 59, red: 39 },
-    agreementZGap: 1.25
+   CHANGES FROM v2
+   1. RHR is now RESIDUALISED against HRV instead of amplified when it agrees.
+      In Matt's data RHR and ln(rMSSD) correlate at r = -0.85, so the old
+      "coupling amplifier" fired on 68% of HRV-down days and simply double
+      counted HRV on the days that decide the band. The engine now regresses
+      RHR on ln(rMSSD) across history and scores the RESIDUAL - the part of
+      resting HR that HRV does not explain (illness, heat, dehydration,
+      alcohol). Falls back to plain v2 behaviour (minus the amp) when there
+      aren't enough paired days.
+   2. Subjective absolute anchor is now the athlete's own median instead of a
+      hardcoded 6.5. The old anchor equalled Matt's all-time minimum, so the
+      absolute half of the subjective term was never negative - a standing
+      +3.5 points of score every single day.
+   3. saturationRHR is now a PER-SOURCE PERSONAL PERCENTILE instead of a
+      hardcoded 50 bpm. Matt's 360HP RHR never goes below 53, so the whole
+      saturation guard was dead code on the strap - the one check meant to
+      stop an inflated HRV spike reading as green.
+   4. travelPenalty now counts CALENDAR days, not rows. A missed morning
+      reading used to make an older flight look more recent than it was
+      (0.22 penalty instead of 0.14).
+   5. Artefact count (hp_filtered) is now used. Noisy readings skew HIGH
+      (filtered >= 3 averages ~43% higher rMSSD), so high-artefact days get
+      their HRV upside capped at neutral and their confidence lowered.
+
+   Also removed two dead variables (action, actionFinal) that were computed
+   and never returned.
+   ============================================================================ */
+
+const ENGINE_VERSION = 2.1;
+
+const CONFIG = {
+  weights: {
+    hrvAcute:     0.30,
+    hrvChronic:   0.08,
+    hrvStability: 0.05,
+    subjective:   0.30,
+    rhr:          0.12,
+    sleep:        0.09,
+    ouraReady:    0.06
+  },
+  baselineDays:         7,
+  chronicDays:         30,
+  dispersionDays:      60,
+  minBaselineReadings:  4,
+  minDaysForSD:        14,
+  swcMultiplier:      0.5,
+  tanhSoftness:       2.0,
+  saturationZ:        1.5,
+
+  // --- v2.1: saturation RHR is now personal, not a fixed 50 bpm ---
+  saturationRhrPercentile: 0.15,   // "unusually low for YOU" = bottom 15% of your own history
+  saturationRhrFallback:    50,    // only used before there is enough history
+
+  // --- v2.1: RHR residualisation replaces the coupling amplifier ---
+  minPairsForResidual:      20,    // paired RHR+HRV days needed to fit the regression
+
+  // --- v2.1: artefact handling ---
+  artefactHighCount:         3,    // `filtered` at or above this = low-quality reading
+  artefactFullDiscount:      9,    // at this many corrected beats, upside is fully neutralised
+
+  subjectiveRedFloor:      5.0,
+  subjectiveAmberFloor:    6.5,
+  subjectiveAnchorFallback: 6.5,   // v2.1: used only until there's enough history
+  subjectiveAnchorSpread:   3.0,
+
+  deepSuppressionZ:    -2.0,
+  severeSuppressionZ:  -3.0,
+  tempFlagC:            0.5,
+  illnessRhrZ:          1.0,
+  illnessHrvZ:         -1.0,
+  travelDecay: {
+    short: [0.10, 0.05],
+    long:  [0.22, 0.14, 0.07, 0.03]
+  },
+  sleepDebtNights: 3,
+  sleepRegularityDays: 7,
+  // v2.1: recentred from 59/39. Removing the standing subjective lift dropped
+  // every score by ~4 points, so the OLD thresholds would have cut greens from
+  // 26% of days to 11% - a behaviour change that was never the point of the fix.
+  // 56/37 reproduces the green/amber/red mix you're used to on the corrected
+  // score. Set back to { green: 59, red: 39 } if you'd rather have a stricter app.
+  bands: { green: 56, red: 37 },
+  agreementZGap: 1.25
+};
+
+/* ---------------------------------------------------------------- helpers -- */
+
+const isNum = v => typeof v === 'number' && isFinite(v);
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+function mean(a) {
+  const v = a.filter(isNum);
+  return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
+}
+function median(a) {
+  const v = a.filter(isNum).slice().sort((x, y) => x - y);
+  if (!v.length) return null;
+  const m = Math.floor(v.length / 2);
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+}
+function percentile(a, p) {
+  const v = a.filter(isNum).slice().sort((x, y) => x - y);
+  if (!v.length) return null;
+  const idx = clamp(Math.floor(p * (v.length - 1)), 0, v.length - 1);
+  return v[idx];
+}
+function sd(a) {
+  const v = a.filter(isNum);
+  if (v.length < 2) return null;
+  const m = mean(v);
+  return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / (v.length - 1));
+}
+function robustSD(a) {
+  const v = a.filter(isNum);
+  if (v.length < 3) return null;
+  const med = median(v);
+  const devs = v.map(x => Math.abs(x - med));
+  const m = median(devs);
+  const r = m * 1.4826;
+  return (r && r > 1e-9) ? r : sd(v);
+}
+function cv(a) {
+  const m = mean(a), s = sd(a);
+  return (isNum(m) && isNum(s) && Math.abs(m) > 1e-9) ? s / Math.abs(m) : null;
+}
+function squash(z, softness = CONFIG.tanhSoftness) {
+  return Math.tanh(z / softness);
+}
+
+/* v2.1: real calendar-day arithmetic on 'YYYY-MM-DD' strings */
+function daysBetween(fromISO, toISO) {
+  const a = Date.parse(String(fromISO).slice(0, 10) + 'T00:00:00Z');
+  const b = Date.parse(String(toISO).slice(0, 10) + 'T00:00:00Z');
+  if (!isFinite(a) || !isFinite(b)) return null;
+  return Math.round((b - a) / 86400000);
+}
+
+function priorDays(history, targetDate, n) {
+  const before = history.filter(d => d.date < targetDate);
+  return before.slice(-n);
+}
+function series(days, key, transform) {
+  return days
+    .map(d => (isNum(d[key]) && d[key] > 0 ? (transform ? transform(d[key]) : d[key]) : null))
+    .filter(isNum);
+}
+const ln = x => Math.log(x);
+
+function buildBaseline(days, key, transform) {
+  const shortWin = days.slice(-CONFIG.baselineDays);
+  const dispWin  = days.slice(-CONFIG.dispersionDays);
+  const shortVals = series(shortWin, key, transform);
+  const dispVals  = series(dispWin,  key, transform);
+  const center = median(shortVals);
+  const spread = robustSD(dispVals);
+  return {
+    center, spread,
+    n: shortVals.length, nRef: dispVals.length,
+    swc: isNum(spread) ? spread * CONFIG.swcMultiplier : null,
+    valid: isNum(center) && shortVals.length >= CONFIG.minBaselineReadings,
+    spreadReliable: isNum(spread) && dispVals.length >= CONFIG.minDaysForSD
   };
+}
+function zScore(value, baseline) {
+  if (!isNum(value) || !baseline || !isNum(baseline.center)) return null;
+  if (!isNum(baseline.spread) || baseline.spread < 1e-9) return null;
+  return (value - baseline.center) / baseline.spread;
+}
 
-  const isNum = v => typeof v === 'number' && isFinite(v);
-  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+/* v2.1: is today's HRV reading artefact-heavy? */
+function artefactsHigh(today) {
+  return isNum(today.hp_filtered) && today.hp_filtered >= CONFIG.artefactHighCount;
+}
 
-  function mean(a) {
-    const v = a.filter(isNum);
-    return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null;
-  }
-  function median(a) {
-    const v = a.filter(isNum).slice().sort((x, y) => x - y);
-    if (!v.length) return null;
-    const m = Math.floor(v.length / 2);
-    return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
-  }
-  function sd(a) {
-    const v = a.filter(isNum);
-    if (v.length < 2) return null;
-    const m = mean(v);
-    return Math.sqrt(v.reduce((s, x) => s + (x - m) ** 2, 0) / (v.length - 1));
-  }
-  function robustSD(a) {
-    const v = a.filter(isNum);
-    if (v.length < 3) return null;
-    const med = median(v);
-    const devs = v.map(x => Math.abs(x - med));
-    const m = median(devs);
-    const r = m * 1.4826;
-    return (r && r > 1e-9) ? r : sd(v);
-  }
-  function cv(a) {
-    const m = mean(a), s = sd(a);
-    return (isNum(m) && isNum(s) && Math.abs(m) > 1e-9) ? s / Math.abs(m) : null;
-  }
-  function squash(z, softness = CONFIG.tanhSoftness) {
-    return Math.tanh(z / softness);
-  }
+/* v2.1: which RHR are we using, and what counts as "unusually low" for that source? */
+function resolveRhr(today, hist) {
+  const src = isNum(today.o_rhr) ? { val: today.o_rhr, key: 'o_rhr' }
+            : isNum(today.hp_rhr) ? { val: today.hp_rhr, key: 'hp_rhr' }
+            : null;
+  if (!src) return { val: null, key: null, lowThreshold: null };
+  const vals = series(priorDays(hist, today.date, CONFIG.dispersionDays), src.key);
+  const lowThreshold = vals.length >= CONFIG.minDaysForSD
+    ? percentile(vals, CONFIG.saturationRhrPercentile)
+    : CONFIG.saturationRhrFallback;
+  return { ...src, lowThreshold };
+}
 
-  function priorDays(history, targetDate, n) {
-    const before = history.filter(d => d.date < targetDate);
-    return before.slice(-n);
-  }
-  function series(days, key, transform) {
-    return days
-      .map(d => (isNum(d[key]) && d[key] > 0 ? (transform ? transform(d[key]) : d[key]) : null))
-      .filter(isNum);
-  }
-  const ln = x => Math.log(x);
+/* -------------------------------------------------------------- components -- */
 
-  function buildBaseline(days, key, transform) {
-    const shortWin = days.slice(-CONFIG.baselineDays);
-    const dispWin  = days.slice(-CONFIG.dispersionDays);
-    const shortVals = series(shortWin, key, transform);
-    const dispVals  = series(dispWin,  key, transform);
-    const center = median(shortVals);
-    const spread = robustSD(dispVals);
+function componentHrvAcute(today, hist) {
+  const sources = [
+    { key: 'hp_hrv', label: '360HP', val: today.hp_hrv },
+    { key: 'o_hrv',  label: 'Oura',  val: today.o_hrv  }
+  ];
+  const noisy = artefactsHigh(today);
+  for (const src of sources) {
+    if (!isNum(src.val) || src.val <= 0) continue;
+    const base = buildBaseline(hist, src.key, ln);
+    if (!base.valid) continue;
+    const z = zScore(ln(src.val), base);
+    if (!isNum(z)) continue;
+    let zEff = Math.min(z, CONFIG.saturationZ);
+
+    // v2.1: artefact-heavy readings skew high, so discount the UPSIDE in
+    // proportion to how noisy the recording was - graded, not a cliff edge.
+    // Downside is never touched: a low reading on a noisy trace is still low.
+    // Only 360HP carries an artefact count; Oura is unaffected.
+    let upsideCapped = false;
+    if (noisy && src.key === 'hp_hrv' && zEff > 0) {
+      const span = Math.max(1, CONFIG.artefactFullDiscount - CONFIG.artefactHighCount);
+      const severity = clamp((today.hp_filtered - CONFIG.artefactHighCount + 1) / span, 0, 1);
+      zEff = zEff * (1 - severity);
+      upsideCapped = severity > 0;
+    }
+
+    const score = squash(zEff);
+    const meaningful = isNum(base.swc) && Math.abs(ln(src.val) - base.center) > base.swc;
     return {
-      center, spread,
-      n: shortVals.length, nRef: dispVals.length,
-      swc: isNum(spread) ? spread * CONFIG.swcMultiplier : null,
-      valid: isNum(center) && shortVals.length >= CONFIG.minBaselineReadings,
-      spreadReliable: isNum(spread) && dispVals.length >= CONFIG.minDaysForSD
-    };
-  }
-  function zScore(value, baseline) {
-    if (!isNum(value) || !baseline || !isNum(baseline.center)) return null;
-    if (!isNum(baseline.spread) || baseline.spread < 1e-9) return null;
-    return (value - baseline.center) / baseline.spread;
-  }
-
-  function componentHrvAcute(today, hist) {
-    const sources = [
-      { key: 'hp_hrv', label: '360HP', val: today.hp_hrv },
-      { key: 'o_hrv',  label: 'Oura',  val: today.o_hrv  }
-    ];
-    for (const src of sources) {
-      if (!isNum(src.val) || src.val <= 0) continue;
-      const base = buildBaseline(hist, src.key, ln);
-      if (!base.valid) continue;
-      const z = zScore(ln(src.val), base);
-      if (!isNum(z)) continue;
-      const zEff = Math.min(z, CONFIG.saturationZ);
-      const score = squash(zEff);
-      const meaningful = isNum(base.swc) && Math.abs(ln(src.val) - base.center) > base.swc;
-      return {
-        available: true, score, z, source: src.label, meaningful,
-        note: meaningful
+      available: true, score, z, source: src.label, meaningful, upsideCapped,
+      note: upsideCapped
+        ? `${src.label} HRV reads high but the recording was noisy - treated as neutral`
+        : meaningful
           ? `${src.label} HRV ${z >= 0 ? 'above' : 'below'} baseline by more than the smallest worthwhile change`
           : `${src.label} HRV within normal day-to-day noise`
-      };
-    }
-    return { available: false, score: 0, z: null, note: 'No usable HRV today' };
-  }
-
-  function componentHrvChronic(today, hist) {
-    const key = series(priorDays(hist, today.date, 7), 'hp_hrv', ln).length >= 4
-      ? 'hp_hrv' : 'o_hrv';
-    const w7  = series(priorDays(hist, today.date, CONFIG.baselineDays), key, ln);
-    const w30 = series(priorDays(hist, today.date, CONFIG.chronicDays),  key, ln);
-    if (w7.length < 4 || w30.length < CONFIG.minDaysForSD) {
-      return { available: false, score: 0, z: null, note: 'Not enough history for a trend' };
-    }
-    const m7 = mean(w7), m30 = mean(w30);
-    const spread = robustSD(w30);
-    if (!isNum(spread) || spread < 1e-9) {
-      return { available: false, score: 0, z: null, note: 'Trend dispersion unavailable' };
-    }
-    const z = (m7 - m30) / spread;
-    return {
-      available: true, score: squash(z, 1.0), z,
-      note: z >= 0 ? 'Weekly HRV above the monthly norm' : 'Weekly HRV below the monthly norm'
     };
   }
+  return { available: false, score: 0, z: null, note: 'No usable HRV today' };
+}
 
-  function componentHrvStability(today, hist) {
-    const recent = series(priorDays(hist, today.date, CONFIG.baselineDays), 'hp_hrv', ln);
-    const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
-    if (recent.length < 5 || refDays.length < CONFIG.dispersionDays / 2) {
-      return { available: false, score: 0, z: null, note: 'Not enough data for HRV stability' };
-    }
-    const cvNow = cv(recent);
-    if (!isNum(cvNow)) return { available: false, score: 0, z: null, note: 'CV unavailable' };
-    const hist7cvs = [];
-    for (let i = CONFIG.baselineDays; i <= refDays.length; i++) {
-      const w = series(refDays.slice(i - CONFIG.baselineDays, i), 'hp_hrv', ln);
-      if (w.length >= 5) { const c = cv(w); if (isNum(c)) hist7cvs.push(c); }
-    }
-    if (hist7cvs.length < 10) {
-      return { available: false, score: 0, z: null, note: 'Not enough history for CV norm' };
-    }
-    const cvBase = median(hist7cvs), cvSpread = robustSD(hist7cvs);
-    if (!isNum(cvSpread) || cvSpread < 1e-9) {
-      return { available: false, score: 0, z: null, note: 'CV norm unavailable' };
-    }
-    const z = (cvNow - cvBase) / cvSpread;
-    const rhrNow = isNum(today.o_rhr) ? today.o_rhr : today.hp_rhr;
-    const saturationPlausible = isNum(rhrNow) && rhrNow <= CONFIG.saturationRHR;
-    let score = 0, note = 'HRV day-to-day variation is normal';
-    if (z > 1.0) {
-      score = -squash(z - 1.0, 1.5) * 0.8;
-      note = 'HRV is bouncing around more than usual - stress may be accumulating';
-    } else if (z < -1.5 && saturationPlausible) {
-      score = -squash(Math.abs(z) - 1.5, 1.5) * 0.6;
-      note = 'HRV has gone unusually flat at a low heart rate - watch for overreaching';
-    }
-    return { available: true, score, z, note };
+function componentHrvChronic(today, hist) {
+  const key = series(priorDays(hist, today.date, 7), 'hp_hrv', ln).length >= 4
+    ? 'hp_hrv' : 'o_hrv';
+  const w7  = series(priorDays(hist, today.date, CONFIG.baselineDays), key, ln);
+  const w30 = series(priorDays(hist, today.date, CONFIG.chronicDays),  key, ln);
+  if (w7.length < 4 || w30.length < CONFIG.minDaysForSD) {
+    return { available: false, score: 0, z: null, note: 'Not enough history for a trend' };
   }
-
-  function componentSubjective(today, hist) {
-    const v = today.hp_subjective;
-    if (!isNum(v)) {
-      return { available: false, score: 0, z: null, note: 'No subjective rating today' };
-    }
-    const base = buildBaseline(priorDays(hist, today.date, CONFIG.dispersionDays), 'hp_subjective');
-    const absScore = clamp((v - 6.5) / 3.0, -1, 1);
-    let relScore = null;
-    const z = base.valid ? zScore(v, base) : null;
-    if (isNum(z)) relScore = squash(z);
-    const score = isNum(relScore) ? (0.55 * absScore + 0.45 * relScore) : absScore;
-    return { available: true, score: clamp(score, -1, 1), z, note: `You rated yourself ${v}/10` };
+  const m7 = mean(w7), m30 = mean(w30);
+  const spread = robustSD(w30);
+  if (!isNum(spread) || spread < 1e-9) {
+    return { available: false, score: 0, z: null, note: 'Trend dispersion unavailable' };
   }
+  const z = (m7 - m30) / spread;
+  return {
+    available: true, score: squash(z, 1.0), z,
+    note: z >= 0 ? 'Weekly HRV above the monthly norm' : 'Weekly HRV below the monthly norm'
+  };
+}
 
-  function componentRhr(today, hist, hrvZ) {
-    const sources = [
-      { key: 'hp_rhr', label: '360HP', val: today.hp_rhr },
-      { key: 'o_rhr',  label: 'Oura',  val: today.o_rhr  }
-    ];
-    for (const src of sources) {
-      if (!isNum(src.val) || src.val <= 0) continue;
-      const base = buildBaseline(hist, src.key);
-      if (!base.valid) continue;
-      const z = zScore(src.val, base);
-      if (!isNum(z)) continue;
-      let score = -squash(z);
-      let coupled = false;
-      if (isNum(hrvZ) && hrvZ < -0.5 && z > 0.5) {
-        score *= CONFIG.rhrCouplingAmp;
-        coupled = true;
-      }
-      return {
-        available: true, score: clamp(score, -1, 1), z, source: src.label, coupled,
-        note: coupled
-          ? `Resting HR up while HRV is down (${src.label}) - these agree`
-          : `Resting HR ${z >= 0 ? 'above' : 'below'} your ${src.label} baseline`
-      };
-    }
-    return { available: false, score: 0, z: null, note: 'No resting HR today' };
+function componentHrvStability(today, hist) {
+  const recent = series(priorDays(hist, today.date, CONFIG.baselineDays), 'hp_hrv', ln);
+  const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
+  if (recent.length < 5 || refDays.length < CONFIG.dispersionDays / 2) {
+    return { available: false, score: 0, z: null, note: 'Not enough data for HRV stability' };
   }
+  const cvNow = cv(recent);
+  if (!isNum(cvNow)) return { available: false, score: 0, z: null, note: 'CV unavailable' };
+  const hist7cvs = [];
+  for (let i = CONFIG.baselineDays; i <= refDays.length; i++) {
+    const w = series(refDays.slice(i - CONFIG.baselineDays, i), 'hp_hrv', ln);
+    if (w.length >= 5) { const c = cv(w); if (isNum(c)) hist7cvs.push(c); }
+  }
+  if (hist7cvs.length < 10) {
+    return { available: false, score: 0, z: null, note: 'Not enough history for CV norm' };
+  }
+  const cvBase = median(hist7cvs), cvSpread = robustSD(hist7cvs);
+  if (!isNum(cvSpread) || cvSpread < 1e-9) {
+    return { available: false, score: 0, z: null, note: 'CV norm unavailable' };
+  }
+  const z = (cvNow - cvBase) / cvSpread;
 
-  function componentSleep(today, hist) {
-    const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
-    const hoursHist = series(refDays, 'o_sleep_hours');
-    const parts = [];
-    if (hoursHist.length >= CONFIG.minDaysForSD && isNum(today.o_sleep_hours)) {
-      const need = median(hoursHist);
-      const recent = [today, ...priorDays(hist, today.date, CONFIG.sleepDebtNights - 1)]
-        .map(d => d.o_sleep_hours).filter(isNum);
-      if (recent.length) {
-        const debt = recent.reduce((s, h) => s + Math.max(0, need - h), 0);
-        parts.push({ w: 0.6, s: clamp(-debt / 3.0, -1, 0.15) });
+  // v2.1: "unusually low resting HR" is now personal, per source
+  const rhrInfo = resolveRhr(today, hist);
+  const saturationPlausible = isNum(rhrInfo.val) && isNum(rhrInfo.lowThreshold)
+                              && rhrInfo.val <= rhrInfo.lowThreshold;
+
+  let score = 0, note = 'HRV day-to-day variation is normal';
+  if (z > 1.0) {
+    score = -squash(z - 1.0, 1.5) * 0.8;
+    note = 'HRV is bouncing around more than usual - stress may be accumulating';
+  } else if (z < -1.5 && saturationPlausible) {
+    score = -squash(Math.abs(z) - 1.5, 1.5) * 0.6;
+    note = 'HRV has gone unusually flat at a low heart rate - watch for overreaching';
+  }
+  return { available: true, score, z, note };
+}
+
+function componentSubjective(today, hist) {
+  const v = today.hp_subjective;
+  if (!isNum(v)) {
+    return { available: false, score: 0, z: null, note: 'No subjective rating today' };
+  }
+  const ref = priorDays(hist, today.date, CONFIG.dispersionDays);
+  const base = buildBaseline(ref, 'hp_subjective');
+
+  // v2.1: anchor the absolute half on the athlete's OWN median, not a fixed 6.5.
+  // With a fixed anchor equal to his all-time low, this term could never be
+  // negative and quietly added a constant lift to every single day.
+  const histVals = series(ref, 'hp_subjective');
+  const anchor = histVals.length >= CONFIG.minDaysForSD
+    ? median(histVals)
+    : CONFIG.subjectiveAnchorFallback;
+
+  const absScore = clamp((v - anchor) / CONFIG.subjectiveAnchorSpread, -1, 1);
+  let relScore = null;
+  const z = base.valid ? zScore(v, base) : null;
+  if (isNum(z)) relScore = squash(z);
+  const score = isNum(relScore) ? (0.55 * absScore + 0.45 * relScore) : absScore;
+  return {
+    available: true, score: clamp(score, -1, 1), z, anchor,
+    note: `You rated yourself ${v}/10`
+  };
+}
+
+/* v2.1: fit RHR ~ a*ln(HRV) + b over history, so we can score what's LEFT OVER */
+function fitRhrResidual(hist, rhrKey, hrvKey) {
+  const pairs = [];
+  for (const d of hist) {
+    if (isNum(d[rhrKey]) && d[rhrKey] > 0 && isNum(d[hrvKey]) && d[hrvKey] > 0) {
+      pairs.push({ x: ln(d[hrvKey]), y: d[rhrKey] });
+    }
+  }
+  if (pairs.length < CONFIG.minPairsForResidual) return null;
+  const mx = mean(pairs.map(p => p.x));
+  const my = mean(pairs.map(p => p.y));
+  let sxy = 0, sxx = 0;
+  for (const p of pairs) { sxy += (p.x - mx) * (p.y - my); sxx += (p.x - mx) ** 2; }
+  if (sxx < 1e-9) return null;
+  const slope = sxy / sxx;
+  const intercept = my - slope * mx;
+  const resids = pairs.map(p => p.y - (slope * p.x + intercept));
+  const center = median(resids);
+  const spread = robustSD(resids);
+  if (!isNum(spread) || spread < 1e-9) return null;
+  return { slope, intercept, center, spread, n: pairs.length };
+}
+
+function componentRhr(today, hist) {
+  const sources = [
+    { rhrKey: 'hp_rhr', hrvKey: 'hp_hrv', label: '360HP', val: today.hp_rhr, hrv: today.hp_hrv },
+    { rhrKey: 'o_rhr',  hrvKey: 'o_hrv',  label: 'Oura',  val: today.o_rhr,  hrv: today.o_hrv  }
+  ];
+  for (const src of sources) {
+    if (!isNum(src.val) || src.val <= 0) continue;
+
+    // --- preferred path: score the residual, i.e. RHR after removing what HRV explains
+    if (isNum(src.hrv) && src.hrv > 0) {
+      const fit = fitRhrResidual(hist, src.rhrKey, src.hrvKey);
+      if (fit) {
+        const expected = fit.slope * ln(src.hrv) + fit.intercept;
+        const resid = src.val - expected;
+        const z = (resid - fit.center) / fit.spread;
+        const score = clamp(-squash(z), -1, 1);
+        return {
+          available: true, score, z, source: src.label, residual: true,
+          expectedRhr: expected,
+          note: z >= 0.5
+            ? `Resting HR is ${Math.abs(resid).toFixed(0)} bpm higher than your HRV alone would predict (${src.label}) - something beyond training fatigue`
+            : z <= -0.5
+              ? `Resting HR is lower than your HRV alone would predict (${src.label}) - a good sign`
+              : `Resting HR is about what your HRV would predict (${src.label}) - no extra signal`
+        };
       }
     }
-    const mids = series(priorDays(hist, today.date, CONFIG.sleepRegularityDays), 'o_sleep_midpoint');
-    const midsRef = series(refDays, 'o_sleep_midpoint');
-    if (mids.length >= 5 && midsRef.length >= CONFIG.minDaysForSD) {
-      const nowSD = sd(mids);
-      const refSDs = [];
-      for (let i = CONFIG.sleepRegularityDays; i <= refDays.length; i++) {
-        const w = series(refDays.slice(i - CONFIG.sleepRegularityDays, i), 'o_sleep_midpoint');
-        if (w.length >= 5) { const s = sd(w); if (isNum(s)) refSDs.push(s); }
-      }
-      if (isNum(nowSD) && refSDs.length >= 10) {
-        const b = median(refSDs), sp = robustSD(refSDs);
-        if (isNum(sp) && sp > 1e-9) {
-          parts.push({ w: 0.2, s: clamp(-squash((nowSD - b) / sp), -1, 0.5) });
-        }
-      }
-    }
-    if (isNum(today.o_sleep_score)) {
-      parts.push({ w: 0.2, s: clamp((today.o_sleep_score - 75) / 20, -1, 1) });
-    }
-    if (!parts.length) {
-      return { available: false, score: 0, z: null, note: 'No sleep data' };
-    }
-    const wSum = parts.reduce((s, p) => s + p.w, 0);
-    const score = parts.reduce((s, p) => s + p.w * p.s, 0) / wSum;
+
+    // --- fallback: plain baseline z-score (v2 behaviour, WITHOUT the coupling amp)
+    const base = buildBaseline(hist, src.rhrKey);
+    if (!base.valid) continue;
+    const z = zScore(src.val, base);
+    if (!isNum(z)) continue;
     return {
-      available: true, score: clamp(score, -1, 1), z: null,
-      note: score < -0.25 ? 'Sleep is running short or irregular'
-          : score >  0.25 ? 'Sleep has been solid'
-          : 'Sleep is around normal'
+      available: true, score: clamp(-squash(z), -1, 1), z, source: src.label, residual: false,
+      note: `Resting HR ${z >= 0 ? 'above' : 'below'} your ${src.label} baseline`
     };
   }
+  return { available: false, score: 0, z: null, note: 'No resting HR today' };
+}
 
-  function componentOuraReadiness(today) {
-    if (!isNum(today.o_readiness)) {
-      return { available: false, score: 0, z: null, note: 'No Oura readiness' };
+function componentSleep(today, hist) {
+  const refDays = priorDays(hist, today.date, CONFIG.dispersionDays);
+  const hoursHist = series(refDays, 'o_sleep_hours');
+  const parts = [];
+  if (hoursHist.length >= CONFIG.minDaysForSD && isNum(today.o_sleep_hours)) {
+    const need = median(hoursHist);
+    const recent = [today, ...priorDays(hist, today.date, CONFIG.sleepDebtNights - 1)]
+      .map(d => d.o_sleep_hours).filter(isNum);
+    if (recent.length) {
+      const debt = recent.reduce((s, h) => s + Math.max(0, need - h), 0);
+      parts.push({ w: 0.6, s: clamp(-debt / 3.0, -1, 0.15) });
     }
-    return {
-      available: true, score: clamp((today.o_readiness - 70) / 20, -1, 1), z: null,
-      note: `Oura readiness ${Math.round(today.o_readiness)}`
-    };
+  }
+  const mids = series(priorDays(hist, today.date, CONFIG.sleepRegularityDays), 'o_sleep_midpoint');
+  const midsRef = series(refDays, 'o_sleep_midpoint');
+  if (mids.length >= 5 && midsRef.length >= CONFIG.minDaysForSD) {
+    const nowSD = sd(mids);
+    const refSDs = [];
+    for (let i = CONFIG.sleepRegularityDays; i <= refDays.length; i++) {
+      const w = series(refDays.slice(i - CONFIG.sleepRegularityDays, i), 'o_sleep_midpoint');
+      if (w.length >= 5) { const s = sd(w); if (isNum(s)) refSDs.push(s); }
+    }
+    if (isNum(nowSD) && refSDs.length >= 10) {
+      const b = median(refSDs), sp = robustSD(refSDs);
+      if (isNum(sp) && sp > 1e-9) {
+        parts.push({ w: 0.2, s: clamp(-squash((nowSD - b) / sp), -1, 0.5) });
+      }
+    }
+  }
+  if (isNum(today.o_sleep_score)) {
+    parts.push({ w: 0.2, s: clamp((today.o_sleep_score - 75) / 20, -1, 1) });
+  }
+  if (!parts.length) {
+    return { available: false, score: 0, z: null, note: 'No sleep data' };
+  }
+  const wSum = parts.reduce((s, p) => s + p.w, 0);
+  const score = parts.reduce((s, p) => s + p.w * p.s, 0) / wSum;
+  return {
+    available: true, score: clamp(score, -1, 1), z: null,
+    note: score < -0.25 ? 'Sleep is running short or irregular'
+        : score >  0.25 ? 'Sleep has been solid'
+        : 'Sleep is around normal'
+  };
+}
+
+function componentOuraReadiness(today) {
+  if (!isNum(today.o_readiness)) {
+    return { available: false, score: 0, z: null, note: 'No Oura readiness' };
+  }
+  return {
+    available: true, score: clamp((today.o_readiness - 70) / 20, -1, 1), z: null,
+    note: `Oura readiness ${Math.round(today.o_readiness)}`
+  };
+}
+
+/* v2.1: travel decay now measured in CALENDAR days, so a missed reading can't
+   make an older flight look more recent than it was. */
+function travelPenalty(today, hist) {
+  const maxSpan = Math.max(
+    CONFIG.travelDecay.short.length,
+    CONFIG.travelDecay.long.length
+  );
+  const lookback = [...priorDays(hist, today.date, maxSpan + 5), today];
+  let worst = 0, label = null;
+  for (const d of lookback) {
+    const mode = d.travel;
+    if (!mode || mode === 'none') continue;
+    const decay = CONFIG.travelDecay[mode];
+    if (!decay) continue;
+    const daysSince = daysBetween(d.date, today.date);
+    if (daysSince === null) continue;
+    const idx = daysSince - 1;
+    if (idx < 0 || idx >= decay.length) continue;
+    if (decay[idx] > worst) { worst = decay[idx]; label = mode; }
+  }
+  return { penalty: worst, mode: label };
+}
+
+function buildFlags(today, comps, travel, hist) {
+  const flags = [];
+  const hrvZ = comps.hrvAcute.z;
+  const rhrZ = comps.rhr.z;
+  const tags = (today.noteTags || []).map(t => String(t).toLowerCase());
+  if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC &&
+      isNum(rhrZ) && rhrZ >= CONFIG.illnessRhrZ &&
+      isNum(hrvZ) && hrvZ <= CONFIG.illnessHrvZ) {
+    flags.push({ type: 'illness', cap: 'red',
+      message: 'Temperature, resting HR and HRV are all moving the wrong way together - treat as possible illness' });
+  } else if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC) {
+    flags.push({ type: 'temp', cap: 'amber',
+      message: `Body temperature ${today.o_temp_dev.toFixed(1)}C above your normal` });
+  }
+  if (isNum(today.hp_subjective)) {
+    if (today.hp_subjective <= CONFIG.subjectiveRedFloor) {
+      flags.push({ type: 'subjective', cap: 'red',
+        message: 'You rated yourself low enough that nothing else overrides it' });
+    } else if (today.hp_subjective <= CONFIG.subjectiveAmberFloor) {
+      flags.push({ type: 'subjective', cap: 'amber',
+        message: 'Subjective rating is below your working threshold' });
+    }
+  }
+  if (isNum(hrvZ) && hrvZ <= CONFIG.severeSuppressionZ) {
+    flags.push({ type: 'hrv', cap: 'red',
+      message: 'HRV is more than 3 SD below baseline - nothing else outweighs this' });
+  } else if (isNum(hrvZ) && hrvZ <= CONFIG.deepSuppressionZ) {
+    flags.push({ type: 'hrv', cap: 'amber',
+      message: 'HRV is more than 2 SD below baseline - deep suppression' });
   }
 
-  function travelPenalty(today, hist) {
-    const lookback = [...priorDays(hist, today.date, 5), today];
-    let worst = 0, label = null;
-    lookback.forEach((d, i) => {
-      const daysSince = lookback.length - 1 - i;
-      const mode = d.travel;
-      if (!mode || mode === 'none') return;
-      const decay = CONFIG.travelDecay[mode];
-      if (!decay) return;
-      const idx = daysSince - 1;
-      if (idx < 0 || idx >= decay.length) return;
-      if (decay[idx] > worst) { worst = decay[idx]; label = mode; }
+  // v2.1: saturation guard now uses a personal low-RHR threshold per source
+  const rhrInfo = resolveRhr(today, hist);
+  if (isNum(hrvZ) && hrvZ > CONFIG.saturationZ &&
+      isNum(rhrInfo.val) && isNum(rhrInfo.lowThreshold) && rhrInfo.val <= rhrInfo.lowThreshold) {
+    flags.push({ type: 'saturation', cap: null,
+      message: 'HRV is well above baseline at a very low heart rate - read this as neutral, not as a green light' });
+  }
+
+  // v2.1: artefact-heavy recording
+  if (artefactsHigh(today)) {
+    flags.push({ type: 'quality', cap: null,
+      message: `This morning's recording had ${today.hp_filtered} corrected beats - noisy readings tend to read artificially high, so any upside is being discounted` });
+  }
+
+  if (tags.some(t => /pain|injur|sore|ill|sick|cold|flu/.test(t))) {
+    flags.push({ type: 'note', cap: 'amber',
+      message: 'You logged pain or illness in your note' });
+  }
+  if (travel.mode === 'long' && travel.penalty >= 0.14) {
+    flags.push({ type: 'travel', cap: 'amber',
+      message: 'Long-haul travel is still in your system' });
+  }
+  return flags;
+}
+
+function buildConfidence(comps, coverage, hist, today) {
+  const reasons = [];
+  let level = 3;
+  const days = priorDays(hist, today.date, CONFIG.dispersionDays).length;
+  if (days < CONFIG.baselineDays)      { level = 0; reasons.push('Baseline is still building'); }
+  else if (days < CONFIG.minDaysForSD) { level = Math.min(level, 1); reasons.push('Fewer than two weeks of baseline'); }
+  else if (days < 28)                  { level = Math.min(level, 2); reasons.push('Under four weeks of baseline'); }
+  if (coverage < 0.6) { level = Math.min(level, 1); reasons.push('Several inputs missing today'); }
+  else if (coverage < 0.85) { level = Math.min(level, 2); reasons.push('Some inputs missing today'); }
+
+  // v2.1: a noisy recording is a confidence problem, not just a score problem
+  if (artefactsHigh(today)) {
+    level = Math.min(level, 1);
+    reasons.push(`Noisy HRV recording (${today.hp_filtered} beats corrected)`);
+  }
+
+  if (isNum(today.hp_hrv) && isNum(today.o_hrv)) {
+    const zHp = zScore(ln(today.hp_hrv), buildBaseline(hist, 'hp_hrv', ln));
+    const zOu = zScore(ln(today.o_hrv),  buildBaseline(hist, 'o_hrv',  ln));
+    if (isNum(zHp) && isNum(zOu) && Math.abs(zHp - zOu) > CONFIG.agreementZGap) {
+      level = Math.min(level, 1);
+      reasons.push('Your strap and ring disagree today - one reading may be poor quality');
+    }
+  }
+  return { level: ['low', 'moderate', 'good', 'high'][level], reasons };
+}
+
+/* ------------------------------------------------------------------ engine -- */
+
+function computeReadiness(today, history, overrides) {
+  const cfg = Object.assign({}, CONFIG, overrides || {});
+  const hist = (history || [])
+    .filter(d => d && d.date && d.date < today.date)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const hrvAcute = componentHrvAcute(today, hist);
+  const comps = {
+    hrvAcute,
+    hrvChronic:   componentHrvChronic(today, hist),
+    hrvStability: componentHrvStability(today, hist),
+    subjective:   componentSubjective(today, hist),
+    rhr:          componentRhr(today, hist),
+    sleep:        componentSleep(today, hist),
+    ouraReady:    componentOuraReadiness(today)
+  };
+  let availableWeight = 0, weighted = 0;
+  const breakdown = [];
+  for (const key of Object.keys(cfg.weights)) {
+    const w = cfg.weights[key];
+    const c = comps[key];
+    if (c.available) { availableWeight += w; weighted += w * c.score; }
+    breakdown.push({
+      key, weight: w, available: c.available,
+      score: c.available ? Number(c.score.toFixed(3)) : null,
+      z: isNum(c.z) ? Number(c.z.toFixed(2)) : null,
+      note: c.note, source: c.source || null
     });
-    return { penalty: worst, mode: label };
   }
-
-  function buildFlags(today, comps, travel) {
-    const flags = [];
-    const hrvZ = comps.hrvAcute.z;
-    const rhrZ = comps.rhr.z;
-    const tags = (today.noteTags || []).map(t => String(t).toLowerCase());
-    if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC &&
-        isNum(rhrZ) && rhrZ >= CONFIG.illnessRhrZ &&
-        isNum(hrvZ) && hrvZ <= CONFIG.illnessHrvZ) {
-      flags.push({ type: 'illness', cap: 'red',
-        message: 'Temperature, resting HR and HRV are all moving the wrong way together - treat as possible illness' });
-    } else if (isNum(today.o_temp_dev) && today.o_temp_dev >= CONFIG.tempFlagC) {
-      flags.push({ type: 'temp', cap: 'amber',
-        message: `Body temperature ${today.o_temp_dev.toFixed(1)}C above your normal` });
-    }
-    if (isNum(today.hp_subjective)) {
-      if (today.hp_subjective <= CONFIG.subjectiveRedFloor) {
-        flags.push({ type: 'subjective', cap: 'red',
-          message: 'You rated yourself low enough that nothing else overrides it' });
-      } else if (today.hp_subjective <= CONFIG.subjectiveAmberFloor) {
-        flags.push({ type: 'subjective', cap: 'amber',
-          message: 'Subjective rating is below your working threshold' });
-      }
-    }
-    if (isNum(hrvZ) && hrvZ <= CONFIG.severeSuppressionZ) {
-      flags.push({ type: 'hrv', cap: 'red',
-        message: 'HRV is more than 3 SD below baseline - nothing else outweighs this' });
-    } else if (isNum(hrvZ) && hrvZ <= CONFIG.deepSuppressionZ) {
-      flags.push({ type: 'hrv', cap: 'amber',
-        message: 'HRV is more than 2 SD below baseline - deep suppression' });
-    }
-    const rhrNow = isNum(today.o_rhr) ? today.o_rhr : today.hp_rhr;
-    if (isNum(hrvZ) && hrvZ > CONFIG.saturationZ &&
-        isNum(rhrNow) && rhrNow <= CONFIG.saturationRHR) {
-      flags.push({ type: 'saturation', cap: null,
-        message: 'HRV is well above baseline at a very low heart rate - read this as neutral, not as a green light' });
-    }
-    if (tags.some(t => /pain|injur|sore|ill|sick|cold|flu/.test(t))) {
-      flags.push({ type: 'note', cap: 'amber',
-        message: 'You logged pain or illness in your note' });
-    }
-    if (travel.mode === 'long' && travel.penalty >= 0.14) {
-      flags.push({ type: 'travel', cap: 'amber',
-        message: 'Long-haul travel is still in your system' });
-    }
-    return flags;
-  }
-
-  function buildConfidence(comps, coverage, hist, today) {
-    const reasons = [];
-    let level = 3;
-    const days = priorDays(hist, today.date, CONFIG.dispersionDays).length;
-    if (days < CONFIG.baselineDays)      { level = 0; reasons.push('Baseline is still building'); }
-    else if (days < CONFIG.minDaysForSD) { level = Math.min(level, 1); reasons.push('Fewer than two weeks of baseline'); }
-    else if (days < 28)                  { level = Math.min(level, 2); reasons.push('Under four weeks of baseline'); }
-    if (coverage < 0.6) { level = Math.min(level, 1); reasons.push('Several inputs missing today'); }
-    else if (coverage < 0.85) { level = Math.min(level, 2); reasons.push('Some inputs missing today'); }
-    if (isNum(today.hp_hrv) && isNum(today.o_hrv)) {
-      const zHp = zScore(ln(today.hp_hrv), buildBaseline(hist, 'hp_hrv', ln));
-      const zOu = zScore(ln(today.o_hrv),  buildBaseline(hist, 'o_hrv',  ln));
-      if (isNum(zHp) && isNum(zOu) && Math.abs(zHp - zOu) > CONFIG.agreementZGap) {
-        level = Math.min(level, 1);
-        reasons.push('Your strap and ring disagree today - one reading may be poor quality');
-      }
-    }
-    return { level: ['low', 'moderate', 'good', 'high'][level], reasons };
-  }
-
-  function computeReadiness(today, history, overrides) {
-    const cfg = Object.assign({}, CONFIG, overrides || {});
-    const hist = (history || [])
-      .filter(d => d && d.date && d.date < today.date)
-      .sort((a, b) => a.date.localeCompare(b.date));
-    const hrvAcute = componentHrvAcute(today, hist);
-    const comps = {
-      hrvAcute,
-      hrvChronic:   componentHrvChronic(today, hist),
-      hrvStability: componentHrvStability(today, hist),
-      subjective:   componentSubjective(today, hist),
-      rhr:          componentRhr(today, hist, hrvAcute.z),
-      sleep:        componentSleep(today, hist),
-      ouraReady:    componentOuraReadiness(today)
-    };
-    let availableWeight = 0, weighted = 0;
-    const breakdown = [];
-    for (const key of Object.keys(cfg.weights)) {
-      const w = cfg.weights[key];
-      const c = comps[key];
-      if (c.available) { availableWeight += w; weighted += w * c.score; }
-      breakdown.push({
-        key, weight: w, available: c.available,
-        score: c.available ? Number(c.score.toFixed(3)) : null,
-        z: isNum(c.z) ? Number(c.z.toFixed(2)) : null,
-        note: c.note, source: c.source || null
-      });
-    }
-    const hasFreshInput = [today.hp_hrv, today.o_hrv, today.hp_subjective,
-                           today.hp_rhr, today.o_rhr, today.o_sleep_hours,
-                           today.o_readiness].some(v => isNum(v) && v > 0);
-    const coverage = availableWeight;
-    if (!hasFreshInput || availableWeight < 0.2) {
-      return {
-        engineVersion: ENGINE_VERSION, score: null, band: 'unknown', action: 'No data',
-        comp: null, coverage, components: breakdown, flags: [],
-        confidence: { level: 'low', reasons: ['Not enough inputs to score today'] },
-        why: ['Not enough data today to produce a signal.']
-      };
-    }
-    let comp = weighted / availableWeight;
-    const travel = travelPenalty(today, hist);
-    if (travel.penalty > 0) comp -= travel.penalty;
-    comp = clamp(comp, -1, 1);
-    let score = Math.round(50 + 50 * comp);
-    score = clamp(score, 0, 100);
-    let band = score >= cfg.bands.green ? 'green'
-             : score >= cfg.bands.red   ? 'amber'
-             : 'red';
-    const flags = buildFlags(today, comps, travel);
-    const rank = { green: 2, amber: 1, red: 0 };
-    for (const f of flags) {
-      if (!f.cap) continue;
-      if (rank[f.cap] < rank[band]) {
-        band = f.cap;
-        const ceiling = f.cap === 'amber' ? cfg.bands.green - 1 : cfg.bands.red - 1;
-        score = Math.min(score, ceiling);
-      }
-    }
-    const action = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
-    const confidence = buildConfidence(comps, coverage, hist, today);
-
-    // Guard against over-confident calls on thin data: pull the score toward neutral (50)
-    // when the baseline isn't established or coverage is low. A day the engine can't stand
-    // behind should read "moderate / still learning", never a confident green or red.
-    // Caps from hard flags are exempt — an illness/subjective red must survive this.
-    const capBands = flags.filter(f => f.cap).map(f => f.cap);
-    const hasRedCap = capBands.indexOf('red') >= 0;
-    const hasAmberCap = capBands.indexOf('amber') >= 0;
-    if (!hasRedCap && !hasAmberCap) {
-      const shrinkByConf = { low: 0.35, moderate: 0.6, good: 0.85, high: 1.0 }[confidence.level];
-      const shrinkByCov  = clamp(coverage / 0.85, 0.2, 1);
-      const shrink = Math.min(shrinkByConf, shrinkByCov);
-      if (shrink < 1) {
-        score = Math.round(50 + (score - 50) * shrink);
-        band = score >= cfg.bands.green ? 'green' : score >= cfg.bands.red ? 'amber' : 'red';
-      }
-    }
-    const actionFinal = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
-
-    // A "green / push" call should rest on broad agreement, not a single strong input.
-    // If coverage is thin, the best a positive day can read is amber ("moderate").
-    let bandGuarded = band, scoreGuarded = score;
-    if (band === 'green' && coverage < 0.55 && !hasRedCap) {
-      bandGuarded = 'amber';
-      scoreGuarded = Math.min(score, cfg.bands.green - 1);
-    }
-    band = bandGuarded; score = scoreGuarded;
-    const actionGuarded = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
-    const why = breakdown
-      .filter(b => b.available)
-      .map(b => ({ ...b, contribution: Math.abs(b.weight * b.score) }))
-      .sort((a, b) => b.contribution - a.contribution)
-      .map(b => b.note);
-    flags.forEach(f => why.unshift(f.message));
-    if (travel.penalty > 0) {
-      why.push(`${travel.mode === 'long' ? 'Long-haul' : 'Short-haul'} travel is still being counted against today`);
-    }
-    if (coverage < 0.99) {
-      const missing = breakdown.filter(b => !b.available).map(b => b.key);
-      why.push(`Scored on the inputs available (missing: ${missing.join(', ')})`);
-    }
+  const hasFreshInput = [today.hp_hrv, today.o_hrv, today.hp_subjective,
+                         today.hp_rhr, today.o_rhr, today.o_sleep_hours,
+                         today.o_readiness].some(v => isNum(v) && v > 0);
+  const coverage = availableWeight;
+  if (!hasFreshInput || availableWeight < 0.2) {
     return {
-      engineVersion: ENGINE_VERSION,
-      score, band, action: actionGuarded,
-      comp: Number(comp.toFixed(3)),
-      coverage: Number(coverage.toFixed(2)),
-      components: breakdown, flags, confidence, travel, why
+      engineVersion: ENGINE_VERSION, score: null, band: 'unknown', action: 'No data',
+      comp: null, coverage, components: breakdown, flags: [],
+      confidence: { level: 'low', reasons: ['Not enough inputs to score today'] },
+      why: ['Not enough data today to produce a signal.']
     };
   }
+  let comp = weighted / availableWeight;
+  const travel = travelPenalty(today, hist);
+  if (travel.penalty > 0) comp -= travel.penalty;
+  comp = clamp(comp, -1, 1);
+  let score = Math.round(50 + 50 * comp);
+  score = clamp(score, 0, 100);
+  let band = score >= cfg.bands.green ? 'green'
+           : score >= cfg.bands.red   ? 'amber'
+           : 'red';
+  const flags = buildFlags(today, comps, travel, hist);
+  const rank = { green: 2, amber: 1, red: 0 };
+  for (const f of flags) {
+    if (!f.cap) continue;
+    if (rank[f.cap] < rank[band]) {
+      band = f.cap;
+      const ceiling = f.cap === 'amber' ? cfg.bands.green - 1 : cfg.bands.red - 1;
+      score = Math.min(score, ceiling);
+    }
+  }
+  const confidence = buildConfidence(comps, coverage, hist, today);
 
-  function recomputeAll(allDays) {
-    const sorted = (allDays || []).slice().sort((a, b) => a.date.localeCompare(b.date));
-    return sorted.map((day, i) => ({
-      date: day.date,
-      ...computeReadiness(day, sorted.slice(0, i))
-    }));
+  // Guard against over-confident calls on thin data: pull the score toward neutral (50)
+  // when the baseline isn't established or coverage is low. Caps from hard flags exempt.
+  const capBands = flags.filter(f => f.cap).map(f => f.cap);
+  const hasRedCap = capBands.indexOf('red') >= 0;
+  const hasAmberCap = capBands.indexOf('amber') >= 0;
+  if (!hasRedCap && !hasAmberCap) {
+    const shrinkByConf = { low: 0.35, moderate: 0.6, good: 0.85, high: 1.0 }[confidence.level];
+    const shrinkByCov  = clamp(coverage / 0.85, 0.2, 1);
+    const shrink = Math.min(shrinkByConf, shrinkByCov);
+    if (shrink < 1) {
+      score = Math.round(50 + (score - 50) * shrink);
+      band = score >= cfg.bands.green ? 'green' : score >= cfg.bands.red ? 'amber' : 'red';
+    }
   }
 
-  function selfTest() {
-    const days = [];
-    const start = new Date('2026-05-01');
-    for (let i = 0; i < 60; i++) {
-      const d = new Date(start); d.setDate(d.getDate() + i);
-      days.push({
-        date: d.toISOString().slice(0, 10),
-        hp_hrv: 62 + Math.sin(i / 3) * 6,
-        hp_rhr: 48 + Math.cos(i / 4) * 2,
-        hp_subjective: 7.5,
-        o_hrv: 58 + Math.sin(i / 3) * 5,
-        o_rhr: 44 + Math.cos(i / 4) * 2,
-        o_readiness: 78, o_sleep_score: 80,
-        o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
-        travel: 'none'
-      });
-    }
-    const base = { date: '2026-07-01', hp_hrv: 62, hp_rhr: 48, hp_subjective: 7.5,
-                   o_hrv: 58, o_rhr: 44, o_readiness: 78, o_sleep_score: 80,
-                   o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
-                   travel: 'none' };
-    const cases = {
-      'steady day':          base,
-      'HRV crash':           { ...base, hp_hrv: 34, o_hrv: 32 },
-      'illness triad':       { ...base, hp_hrv: 40, o_hrv: 38, hp_rhr: 56, o_rhr: 52, o_temp_dev: 0.7 },
-      'low subjective':      { ...base, hp_subjective: 4 },
-      'no strap (Oura only)':{ ...base, hp_hrv: null, hp_rhr: null, hp_subjective: null },
-      'long-haul yesterday': { ...base, travel: 'none' }
-    };
-    const histWithFlight = days.map((d, i) =>
-      i === days.length - 1 ? { ...d, travel: 'long' } : d);
-    const out = {};
-    for (const [name, day] of Object.entries(cases)) {
-      const hist = name === 'long-haul yesterday' ? histWithFlight : days;
-      const r = computeReadiness(day, hist);
-      out[name] = `${r.score} ${r.band.toUpperCase()} (${r.action}, confidence ${r.confidence.level}, coverage ${r.coverage})`;
-    }
-    return out;
+  // A "green / push" call should rest on broad agreement, not a single strong input.
+  if (band === 'green' && coverage < 0.55 && !hasRedCap) {
+    band = 'amber';
+    score = Math.min(score, cfg.bands.green - 1);
   }
+  const action = band === 'green' ? 'Push' : band === 'amber' ? 'Moderate' : 'Recover';
+
+  const why = breakdown
+    .filter(b => b.available)
+    .map(b => ({ ...b, contribution: Math.abs(b.weight * b.score) }))
+    .sort((a, b) => b.contribution - a.contribution)
+    .map(b => b.note);
+  flags.forEach(f => why.unshift(f.message));
+  if (travel.penalty > 0) {
+    why.push(`${travel.mode === 'long' ? 'Long-haul' : 'Short-haul'} travel is still being counted against today`);
+  }
+  if (coverage < 0.99) {
+    const missing = breakdown.filter(b => !b.available).map(b => b.key);
+    why.push(`Scored on the inputs available (missing: ${missing.join(', ')})`);
+  }
+  return {
+    engineVersion: ENGINE_VERSION,
+    score, band, action,
+    comp: Number(comp.toFixed(3)),
+    coverage: Number(coverage.toFixed(2)),
+    components: breakdown, flags, confidence, travel, why
+  };
+}
+
+function recomputeAll(allDays) {
+  const sorted = (allDays || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+  return sorted.map((day, i) => ({
+    date: day.date,
+    ...computeReadiness(day, sorted.slice(0, i))
+  }));
+}
+
+/* -------------------------------------------------------------- self test -- */
+
+function selfTest() {
+  const days = [];
+  const start = new Date('2026-05-01');
+  for (let i = 0; i < 60; i++) {
+    const d = new Date(start); d.setDate(d.getDate() + i);
+    days.push({
+      date: d.toISOString().slice(0, 10),
+      hp_hrv: 62 + Math.sin(i / 3) * 6,
+      hp_rhr: 48 + Math.cos(i / 4) * 2,
+      hp_subjective: 7.5,
+      hp_filtered: 0,
+      o_hrv: 58 + Math.sin(i / 3) * 5,
+      o_rhr: 44 + Math.cos(i / 4) * 2,
+      o_readiness: 78, o_sleep_score: 80,
+      o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
+      travel: 'none'
+    });
+  }
+  const base = { date: '2026-07-01', hp_hrv: 62, hp_rhr: 48, hp_subjective: 7.5,
+                 hp_filtered: 0,
+                 o_hrv: 58, o_rhr: 44, o_readiness: 78, o_sleep_score: 80,
+                 o_sleep_hours: 7.4, o_sleep_midpoint: 3.5, o_temp_dev: 0.05,
+                 travel: 'none' };
+  const cases = {
+    'steady day':           base,
+    'HRV crash':            { ...base, hp_hrv: 34, o_hrv: 32 },
+    'illness triad':        { ...base, hp_hrv: 40, o_hrv: 38, hp_rhr: 56, o_rhr: 52, o_temp_dev: 0.7 },
+    'low subjective':       { ...base, hp_subjective: 4 },
+    'no strap (Oura only)': { ...base, hp_hrv: null, hp_rhr: null, hp_subjective: null },
+    'long-haul yesterday':  { ...base, travel: 'none' },
+    'noisy HRV spike':      { ...base, hp_hrv: 88, hp_filtered: 6 },
+    'RHR high, HRV normal': { ...base, hp_rhr: 58, o_rhr: 53 },
+    'cold start':           { ...base, date: '2026-05-02' }
+  };
+  const histWithFlight = days.map((d, i) =>
+    i === days.length - 1 ? { ...d, travel: 'long' } : d);
+  const out = {};
+  for (const [name, day] of Object.entries(cases)) {
+    let hist = days;
+    if (name === 'long-haul yesterday') hist = histWithFlight;
+    if (name === 'cold start') hist = days.slice(0, 1);
+    const r = computeReadiness(day, hist);
+    out[name] = `${r.score} ${String(r.band).toUpperCase()} (${r.action}, confidence ${r.confidence.level}, coverage ${r.coverage})`;
+  }
+  return out;
+}
 
     return { compute: computeReadiness, recompute: recomputeAll, CONFIG: CONFIG, VERSION: ENGINE_VERSION };
   })();
@@ -976,6 +1169,7 @@
       hp_rhr: (row.hp_rhr!=null?row.hp_rhr:null),
       o_rhr:  (row.o_rhr!=null?row.o_rhr:null),
       hp_subjective: (row.hp_subjective!=null?row.hp_subjective:null),
+      hp_filtered: (row.hp_filtered!=null?row.hp_filtered:null),   // v2.1: noisy readings get their upside discounted
       o_readiness: (row.o_readiness!=null?row.o_readiness:null),
       o_sleep_score: (row.o_sleepscore!=null?row.o_sleepscore:null),
       o_sleep_hours: (row.o_sleephrs!=null?row.o_sleephrs:null),
@@ -1292,7 +1486,7 @@
     ],LEG);
 
     // daily score bars
-    (function(){var cd=card("Daily readiness score","0\u2013100 from all sources fused. Green \u2265 59, amber 39\u201358, red < 39. Dotted line is your 7-day average.");
+    (function(){var cd=card("Daily readiness score","0\u2013100 from all sources fused. Green \u2265 56, amber 37\u201355, red < 37. Dotted line is your 7-day average.");
       var cv=mkCanvas(cd,200);container.appendChild(cd);
       var sc=rowsB.map(function(d){return d.score100;});
       var scRoll=sc.map(function(_,i){var w=[];for(var k=Math.max(0,i-6);k<=i;k++){if(sc[k]!=null)w.push(sc[k]);}return w.length?Math.round(mean(w)):null;});
@@ -1981,9 +2175,9 @@
     );
     qa("What do the colours mean?",
       "The score maps to three bands:<br><br>"+
-      "<b style='color:"+C.green+"'>Green (59\u2013100) \u2014 Push.</b> Recovered and ready; good day for a hard session or heavy load.<br><br>"+
-      "<b style='color:"+C.amber+"'>Amber (39\u201358) \u2014 Moderate.</b> Middle ground; technical or moderate work, leave max effort for a green day.<br><br>"+
-      "<b style='color:"+C.red+"'>Red (0\u201338) \u2014 Recover.</b> Signals are down; rest, mobility, or light recovery.");
+      "<b style='color:"+C.green+"'>Green (56\u2013100) \u2014 Push.</b> Recovered and ready; good day for a hard session or heavy load.<br><br>"+
+      "<b style='color:"+C.amber+"'>Amber (37\u201355) \u2014 Moderate.</b> Middle ground; technical or moderate work, leave max effort for a green day.<br><br>"+
+      "<b style='color:"+C.red+"'>Red (0\u201336) \u2014 Recover.</b> Signals are down; rest, mobility, or light recovery.");
     qa("Why does it say \u201cconfidence\u201d?",
       "Confidence is separate from the score. It reflects how much data backed today's number \u2014 how many days of baseline you have, whether your sources agree, and how complete today's readings are. <b>Low confidence pulls the score toward the middle (50)</b> so a thin-data day never tells you to go hard before the app really knows your normal. A brand-new setup starts at low confidence until it learns your baseline (about a week).");
     qa("Is the score trend-based or just today?",
@@ -2005,11 +2199,11 @@
     qa("Why the baseline is 7 days",
       "A rolling 7-day window is the sports-science standard (Plews, Buchheit et al.). It's long enough to filter out single-night noise \u2014 one bad sleep won't wreck your baseline \u2014 but short enough to track your current state and adapt after a hard block or a time-zone change. A 14-day window is steadier but lags too much after travel, which matters a lot for you. You also get a 7-vs-30-day trend line so you can see the bigger direction.");
     qa("Why raw HRV is handled carefully (ln rMSSD)",
-      "Raw rMSSD is mathematically skewed, so simple averages and percentage thresholds on it are misleading. The engine works on the natural-log of rMSSD and flags meaningful change using the <b>smallest worthwhile change</b> (half your own variability) rather than an arbitrary cutoff \u2014 both are the methods the research (Plews et al.) recommends for exactly this. It means a \u201cgreen\u201d genuinely means today is beyond your day-to-day noise, not just slightly up.");
+      "Raw rMSSD is mathematically skewed, so simple averages and percentage thresholds on it are misleading. The engine works on the natural-log of rMSSD and flags meaningful change using the <b>smallest worthwhile change</b> (half your own variability) rather than an arbitrary cutoff \u2014 both are the methods the research (Plews et al.) recommends for exactly this. It means a \u201cgreen\u201d genuinely means today is beyond your day-to-day noise, not just slightly up.<br><br>The app also reads the <b>corrected-beat count</b> from your 360HP export. Noisy recordings tend to read artificially high, so on those mornings any HRV <i>upside</i> is discounted in proportion to how noisy the trace was, and confidence drops. A low reading is never discounted \u2014 only an unearned high one.");
     qa("Why \u201chow you feel\u201d carries as much weight as HRV",
       "Self-report captures things sensors miss \u2014 niggles, illness coming on, life stress, mental freshness. The research (Saw et al., 2016) found subjective wellbeing often tracks training response as well as or better than objective markers. So your morning rating is weighted equal-top with HRV, and a low rating can veto an otherwise green day. The number should never tell you to push when you know you're cooked.");
     qa("Why resting HR and Oura are cross-checks, not co-stars",
-      "Resting HR is a genuine fatigue and illness signal, but it moves less and later than HRV, so it's a supporting 12%. Oura's own readiness is useful as a second opinion \u2014 when it agrees with your 360HP HRV, confidence rises; when they disagree, the app leans cautious rather than picking a winner. Importantly, your two HRV sources are read against separate baselines, because Oura's night-time HRV and 360HP's morning HRV aren't the same measurement.");
+      "Resting HR is a genuine fatigue and illness signal, but in your data it tracks HRV very closely (r = \u22120.85), so scoring it directly would just count HRV twice. The engine therefore works out what your resting HR <b>should</b> be given today's HRV, and scores only the difference \u2014 which is where illness, heat, dehydration and alcohol show up. It stays a supporting 12%. Oura's own readiness is useful as a second opinion \u2014 when it agrees with your 360HP HRV, confidence rises; when they disagree, the app leans cautious rather than picking a winner. Importantly, your two HRV sources are read against separate baselines, because Oura's night-time HRV and 360HP's morning HRV aren't the same measurement.");
     qa("Why travel lowers the score but tournaments don't",
       "A long-haul flight is a real physiological hit \u2014 dehydration, broken sleep, immobility, time-zone disruption \u2014 and you've had travel-induced HRV troughs before, so travel (flagged for the day before) adds caution to the number. A tournament isn't a recovery event, so it doesn't move the score; instead it reshapes the guidance toward arriving fresh. Both were tuned to your actual workflow: fly Friday, read Saturday morning, tag the flight as yesterday.");
     qa("Why it protects you on thin-data days",
