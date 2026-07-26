@@ -341,9 +341,9 @@
   }
   async function teamSignOut(){ if(_teamSB){ try{ await _teamSB.auth.signOut(); }catch(e){} } _teamUser=null; render(false); }
   async function syncToTeam(model){
-    if(!_teamSB) return;
+    if(!_teamSB) return {ok:false,msg:"Team sync not set up"};
     try{
-      var r=await _teamSB.auth.getSession(); var session=r.data.session; if(!session) return;
+      var r=await _teamSB.auth.getSession(); var session=r.data.session; if(!session) return {ok:false,msg:"Not signed in"};
       var rows=(model||[]).filter(function(d){return d.has&&d.iso;}).map(function(d){
         return { day:d.iso, score:d.score100!=null?Math.round(d.score100):null,
           band:d.band==="yellow"?"amber":d.band,
@@ -356,12 +356,13 @@
           reasons:d.reasons||[], raw:{hrvSrc:d.hrvSrc,roll7:d.roll7,roll30:d.roll30,comp:d.comp},
           updated_at:new Date().toISOString() };
       });
-      var changed=rows.filter(function(x){ var sig=x.day+"|"+x.score+"|"+x.band+"|"+(x.reasons?x.reasons.length:0);
-        if(_teamSynced[x.day]===sig) return false; _teamSynced[x.day]=sig; return true; });
-      if(!changed.length) return;
-      var { error } = await _teamSB.from("daily_readiness").upsert(changed,{onConflict:"day"});
-      if(!error){ set("readiness_team_lastsync", String(Date.now())); }
-    }catch(e){}
+      if(!rows.length) return {ok:false,msg:"No data on this device to sync yet"};
+      // upsert ALL rows (don't rely on the in-memory changed-cache, which hides failures)
+      var { error } = await _teamSB.from("daily_readiness").upsert(rows,{onConflict:"day"});
+      if(error){ return {ok:false,msg:(error.message||"database rejected the write")+" \u2014 check the daily_readiness write policy in Supabase"}; }
+      set("readiness_team_lastsync", String(Date.now()));
+      return {ok:true, count:rows.length};
+    }catch(e){ return {ok:false,msg:e.message||"sync failed"}; }
   }
 
   function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
@@ -2931,12 +2932,18 @@
             var last=get("readiness_team_lastsync");
             var lastTxt=last?("last synced "+new Date(parseInt(last,10)).toLocaleTimeString([], {hour:"numeric",minute:"2-digit"})):"signed in \u2014 syncing on open";
             tsSub.textContent="Your scores are shared with your team. "+lastTxt+".";
+            var syncMsg=document.createElement("div");syncMsg.style.cssText="font-size:12px;color:"+C.muted+";margin-top:6px;min-height:16px;";
             var row=document.createElement("div");row.className="btnrow";
             var sync=document.createElement("button");sync.className="btn btn-primary";sync.style.cssText="padding:8px 16px;font-size:13px;";sync.textContent="Sync now";
-            sync.onclick=function(){ sync.textContent="Syncing\u2026"; syncToTeam(fmodel).then(function(){ sync.textContent="Synced \u2713"; setTimeout(function(){render(false);},900); }); };
+            sync.onclick=function(){ sync.textContent="Syncing\u2026"; syncMsg.style.color=C.muted; syncMsg.textContent="";
+              syncToTeam(fmodel).then(function(res){
+                if(res&&res.ok){ sync.textContent="Synced \u2713"; syncMsg.style.color=C.glow; syncMsg.textContent="Shared "+res.count+" day"+(res.count===1?"":"s")+" with your team."; }
+                else { sync.textContent="Sync now"; syncMsg.style.color=C.amber; syncMsg.textContent="Didn\u2019t sync: "+((res&&res.msg)||"unknown error"); }
+                setTimeout(function(){render(false);},1400);
+              }); };
             var out=document.createElement("button");out.className="btn btn-ghost";out.style.cssText="padding:8px 16px;font-size:13px;";out.textContent="Sign out";out.onclick=function(){teamSignOut();};
-            row.appendChild(sync);row.appendChild(out);tsCard.appendChild(row);
-            syncToTeam(fmodel); // auto-sync on open when signed in
+            row.appendChild(sync);row.appendChild(out);tsCard.appendChild(row);tsCard.appendChild(syncMsg);
+            syncToTeam(fmodel).then(function(res){ if(res&&res.ok){ syncMsg.style.color=C.glow; syncMsg.textContent="Shared "+res.count+" day"+(res.count===1?"":"s")+" with your team."; } else if(res&&res.msg){ syncMsg.style.color=C.amber; syncMsg.textContent="Auto-sync: "+res.msg; } }); // auto-sync on open
           } else {
             tsSub.textContent="Sign in to start sharing your daily scores with your team. They only ever see what you sync.";
             var f=document.createElement("div");f.style.cssText="display:flex;flex-direction:column;gap:8px;";
