@@ -1437,14 +1437,22 @@
       ]},options:baseOpts(deepMerge({scales:{y:{min:40,max:100}}},LEG))}));
     }
 
-    // 4) Sleep -> next-day HRV — scatter
+    // 4) Sleep -> next-day HRV — scatter + best-fit line + r
     var pts=[];
     for(var i=0;i<rowsB.length-1;i++){ if(rowsB[i].o_sleephrs!=null && rowsB[i+1].hrv!=null){ pts.push({x:rowsB[i].o_sleephrs,y:rowsB[i+1].hrv}); } }
     if(pts.length>=4){
-      var cd4=card("Sleep \u2192 next-day HRV","Each dot is a night: hours slept vs your HRV the next morning. Up-and-right means more sleep tends to lift your HRV.");
+      var xs4=pts.map(function(p){return p.x;}), ys4=pts.map(function(p){return p.y;});
+      var r4=(typeof pearson==="function")?pearson(xs4,ys4):null;
+      var sub4="Each dot is a night: hours slept vs your HRV the next morning. Up-and-right means more sleep tends to lift your HRV.";
+      if(r4!=null) sub4="Each dot is a night: hours slept vs next-morning HRV. r = "+r4.toFixed(2)+(Math.abs(r4)>0.5?" \u2014 they track closely.":Math.abs(r4)>0.25?" \u2014 a moderate link.":" \u2014 a weak link.");
+      var cd4=card("Sleep \u2192 next-day HRV",sub4);
       var cv4=mkCanvas(cd4,220);container.appendChild(cd4);
-      CHARTS.push(new Chart(cv4,{type:"scatter",data:{datasets:[{label:"night",data:pts,backgroundColor:C.hrv,pointRadius:5,pointHoverRadius:6}]},
-        options:baseOpts(deepMerge({scales:{x:{title:{display:true,text:"hours slept",color:C.muted},grid:{color:C.line}},y:{title:{display:true,text:"next-day HRV",color:C.muted}}}},{plugins:{legend:{display:false}}}))}));
+      var ds4=[{type:"scatter",label:"night",data:pts,backgroundColor:C.hrv,pointRadius:5,pointHoverRadius:6}];
+      var fit4=linreg(xs4,ys4);
+      if(fit4){var xmin=Math.min.apply(null,xs4),xmax=Math.max.apply(null,xs4);
+        ds4.push({type:"line",label:"best fit",data:[{x:xmin,y:r1(fit4.m*xmin+fit4.b)},{x:xmax,y:r1(fit4.m*xmax+fit4.b)}],borderColor:C.amber,borderWidth:2,borderDash:[6,4],pointRadius:0,fill:false});}
+      CHARTS.push(new Chart(cv4,{data:{datasets:ds4},
+        options:baseOpts(deepMerge({scales:{x:{type:"linear",title:{display:true,text:"hours slept",color:C.muted},grid:{color:C.line}},y:{title:{display:true,text:"next-day HRV",color:C.muted}}}},{plugins:{legend:{display:false}}}))}));
     }
 
     // 5) Sleep efficiency — colour-coded bars + avg
@@ -2954,7 +2962,7 @@
     var body=document.createElement("div");app.appendChild(body);
 
     // date-range filter — applies to the data/chart tabs (not Today or Training)
-    var rangeTabs={trends:1,compare:1,oura:1,insights:1,history:1,hp360:1};
+    var rangeTabs={trends:1,compare:1,oura:1,sleep:1,insights:1,history:1,hp360:1};
     var fmodel=model;
     if(rangeTabs[TAB]){
       // preset dropdown
