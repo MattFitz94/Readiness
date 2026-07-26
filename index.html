@@ -179,6 +179,40 @@
       setJSON(K_TRAINDRAFT,all);
     }catch(e){}
   }
+  // Mark every past session found in the sheet history as "logged" in the app, so scrolling
+  // back through the programme shows completed days as done (with the sheet's weights).
+  // Runs on each sync; only ADDS logged flags, never clears anything he's currently typing.
+  function backfillLoggedFromHistory(history){
+    try{
+      if(!history||!history.length) return;
+      var all=getJSON(K_TRAINDRAFT,{});
+      history.forEach(function(h){
+        if(!h||!h.exercise) return;
+        var wk=h.week||""; var day=h.day||h.dayLabel||""; // history may or may not carry a day label
+        var sets=(h.sets||[]).map(function(x){ return (x==null?"":String(x)); });
+        // a done session has at least one non-empty set cell (a weight or an X)
+        var hasAny=sets.some(function(x){ return x!==""&&x!=="0"; });
+        if(!hasAny) return;
+        var w=[sets[0]||"",sets[1]||"",sets[2]||"",sets[3]||""];
+        var k=wk+"||"+day+"||"+h.exercise;
+        var existing=all[k];
+        // don't overwrite something he's actively typing that ISN'T yet logged
+        if(existing && !existing.logged && (existing.w||[]).some(function(x){return x&&x!=="";})) return;
+        all[k]=Object.assign({v:["","","",""],done:true}, existing||{}, {w:w, logged:true, fromSheet:true});
+      });
+      setJSON(K_TRAINDRAFT,all);
+    }catch(e){}
+  }
+  // Mark a day's just-logged exercises as completed, keeping their values.
+  function markDayLogged(week,day,rows){
+    try{
+      (rows||[]).forEach(function(r){
+        var w=[r.v1||"",r.v2||"",r.v3||"",r.v4||""];
+        var v=[r.vel1||"",r.vel2||"",r.vel3||"",r.vel4||""];
+        saveDraft(week, day, r.exercise, {w:w, v:v, logged:true, loggedAt:Date.now()});
+      });
+    }catch(e){}
+  }
   // Snapshot EVERY training input to disk right now. Called on visibilitychange/pagehide —
   // the events iOS fires when you leave the app — so nothing is lost even if it suspends fast.
   function snapshotTrainingNow(){
@@ -237,10 +271,22 @@
   var _teamRole=null;
   async function teamRefreshRole(){
     if(!_teamSB || !_teamUser){ _teamRole=null; return _teamRole; }
+    _teamRole=null;
+    // Primary: match by EMAIL (every login has one; no separate linking step to forget or break).
     try{
-      var { data } = await _teamSB.from("team_members").select("role,active").eq("user_id",_teamUser.id).maybeSingle();
-      _teamRole = (data && data.active) ? data.role : null;
-    }catch(e){ _teamRole=null; }
+      var email=(_teamUser.email||"").toLowerCase().trim();
+      if(email){
+        var res=await _teamSB.from("team_members").select("role,active").ilike("email",email).maybeSingle();
+        if(res && res.data && res.data.active) _teamRole=res.data.role;
+      }
+    }catch(e){}
+    // Fallback: match by user_id if email lookup found nothing (covers rows linked the old way).
+    if(!_teamRole){
+      try{
+        var r2=await _teamSB.from("team_members").select("role,active").eq("user_id",_teamUser.id).maybeSingle();
+        if(r2 && r2.data && r2.data.active) _teamRole=r2.data.role;
+      }catch(e2){}
+    }
     return _teamRole;
   }
   // permission helpers — when NOT signed in at all, it's your private local app (full access)
@@ -1140,6 +1186,7 @@
       if(!d.ok){ cb({error:d.error||"Sheet returned an error"}); return; }
       setJSON(K_GYM,{weeks:d.weeks||[],history:d.history||[],updated:d.updated||""});
       set(K_GYMTIME,String(Date.now()));
+      backfillLoggedFromHistory(d.history||[]); // mark past sheet sessions as done in the app
       cb({ok:true});
     }).catch(function(e){ clearTimeout(to);
       // Apps Script cold-start can time out the first hit — retry once automatically
@@ -1983,13 +2030,12 @@
     qa("Step 2 \u2014 Give them a role",
       "In Supabase \u2192 <b>SQL Editor</b> \u2192 New query, run this (swap in their details and pick the role \u2014 physio / trainer / staff):<br><br>"+
       "<code style='display:block;background:"+C.panel2+";padding:10px;border-radius:8px;font-size:12px;color:"+C.ink+";overflow-x:auto;'>insert into team_members (email, full_name, role)<br>values ('them@example.com', 'Their Name', 'physio');</code>");
-    qa("Step 3 \u2014 Link the login to the role",
-      "Run this once (it connects any new logins to their role rows):<br><br>"+
-      "<code style='display:block;background:"+C.panel2+";padding:10px;border-radius:8px;font-size:12px;color:"+C.ink+";overflow-x:auto;'>update team_members tm<br>set user_id = u.id<br>from auth.users u<br>where u.email = tm.email and tm.user_id is null;</code>");
-    qa("Step 4 \u2014 Send them the app",
-      "Give them three things: the app link (your GitHub Pages URL), their email, and the password you set. On their phone they open the link in Safari, <b>Share \u2192 Add to Home Screen</b>, open it, go to the Today tab, scroll to <b>Team sync</b>, and sign in with their email + password. They're in \u2014 no account creation on their end.");
+    qa("Step 3 \u2014 Send them the app",
+      "Give them three things: the app link (your GitHub Pages URL), their email, and the password you set. On their phone they open the link, and on the login screen sign in with their email + password. They go straight to your data \u2014 no account creation, no CSV, nothing to set up on their end. (Their role is matched by email automatically \u2014 no linking step needed.)");
     qa("What each role can do",
       "<b>Physio</b> \u2014 sees everything, adds session notes in the Physio tab.<br><b>Trainer</b> \u2014 sees everything, gets your full Training tab to log sessions.<br><b>Staff / head of performance</b> \u2014 sees everything, view-only.<br>Only you (owner) can import data, edit flags, or clear anything.");
+    qa("If a team member lands on your \u201cimport CSV\u201d screen",
+      "That means the app couldn't read their role. Check two things in Supabase: (1) their email in <b>team_members</b> is spelled EXACTLY like their login email, and (2) their row's <b>active</b> is true. Run <code>select email, role, active from team_members;</code> to see. The email match is case-insensitive, but a typo or extra space will break it.");
     qa("Removing someone",
       "In Supabase \u2192 SQL Editor, run:<br><br>"+
       "<code style='display:block;background:"+C.panel2+";padding:10px;border-radius:8px;font-size:12px;color:"+C.ink+";overflow-x:auto;'>update team_members set active = false<br>where email = 'them@example.com';</code><br>They're locked out next time the app checks. Set it back to <code>true</code> to restore.");
@@ -2135,7 +2181,11 @@
     selCard.appendChild(wsel);
     // day dropdown
     var dsel=document.createElement("select");dsel.style.cssText=wsel.style.cssText;
-    days.forEach(function(dd,i){var o=document.createElement("option");o.value=i;o.textContent=(dd.label||("Day "+(i+1)))+(dd.date?"  ("+dd.date+")":"");if(i===sel.d)o.selected=true;dsel.appendChild(o);});
+    days.forEach(function(dd,i){var o=document.createElement("option");o.value=i;
+      var dlabel=(dd.label||("Day "+(i+1)));
+      // is this day logged? (any exercise has a logged draft)
+      var dayLogged=false; try{ var allD=getJSON(K_TRAINDRAFT,{}); var preD=wk.name+"||"+dlabel+"||"; dayLogged=Object.keys(allD).some(function(k){return k.indexOf(preD)===0 && allD[k] && allD[k].logged;}); }catch(e){}
+      o.textContent=(dayLogged?"\u2713 ":"")+dlabel+(dd.date?"  ("+dd.date+")":"");if(i===sel.d)o.selected=true;dsel.appendChild(o);});
     dsel.onchange=function(){sel.d=parseInt(dsel.value,10);setJSON(K_GYMSEL,sel);render(false);};
     selCard.appendChild(dsel);
     container.appendChild(selCard);
@@ -2179,9 +2229,22 @@
         return; // no logging inputs for warm-up movements
       }
 
+      var exDraftEarly=getDraft(wk.name, day.label||("Day "+(sel.d+1)), ex.name);
+      if(!exDraftEarly || !exDraftEarly.logged){
+        // history may not carry a day label — also accept a sheet-backfilled logged entry
+        // for this week+exercise regardless of day.
+        try{ var allDr=getJSON(K_TRAINDRAFT,{}); var nx=normEx(ex.name);
+          Object.keys(allDr).forEach(function(k){ var p=k.split("||"); if(p.length===3 && p[0]===wk.name && allDr[k] && allDr[k].logged && normEx(p[2])===nx){ if(!exDraftEarly) exDraftEarly=allDr[k]; else exDraftEarly.logged=true; } });
+        }catch(e){}
+      }
+      var isLogged=!!(exDraftEarly&&exDraftEarly.logged);
+      if(isLogged){ c.style.borderColor=C.green+"66"; c.style.background="rgba(47,230,176,0.05)"; }
       var meta=[];
       if(ex.sets) meta.push(ex.sets+" sets"); if(ex.reps) meta.push(ex.reps+" reps");
-      c.innerHTML='<div style="font-weight:700;font-size:15px;color:'+C.ink+'">'+ex.name+'</div>'+
+      c.innerHTML='<div style="display:flex;align-items:center;justify-content:space-between;gap:8px">'+
+          '<div style="font-weight:700;font-size:15px;color:'+C.ink+'">'+ex.name+'</div>'+
+          (isLogged?'<span style="font-size:11px;font-weight:700;color:'+C.green+';background:rgba(47,230,176,0.14);padding:4px 10px;border-radius:100px;white-space:nowrap;">\u2713 Logged</span>':'')+
+        '</div>'+
         (meta.length?'<div class="cnote" style="margin:3px 0 6px">'+meta.join(" \u00b7 ")+'</div>':'')+
         (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'')+
         (ex.last?'<div class="ssrc" style="color:'+C.muted+';margin-bottom:8px">Last time: '+ex.last+'</div>':'');
@@ -2276,7 +2339,9 @@
           // keep it from growing unbounded — last ~400 exercise-logs
           if(hist.length>400) hist=hist.slice(hist.length-400);
           setJSON(K_LOGHIST,hist);
-          clearDraftFor(wk.name, day.label||("Day "+(sel.d+1))); // logged — drop the auto-saved draft
+          // KEEP the entered values on the app and mark the day's exercises as logged,
+          // so he can reopen and see the day is done (don't clear the draft).
+          markDayLogged(wk.name, day.label||("Day "+(sel.d+1)), rows);
           alert("Logged "+res.saved+" exercise"+(res.saved===1?"":"s")+" to your sheet \u2705");
         }
         else{gymStatus={state:"err",msg:res.error};alert("Couldn't save: "+res.error);}
