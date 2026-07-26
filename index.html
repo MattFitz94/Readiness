@@ -445,6 +445,19 @@
         else if(sd.duration!=null) hrs=sd.duration/3600;
         else if(sd.time_in_bed!=null && sd.efficiency!=null) hrs=(sd.time_in_bed*(sd.efficiency/100))/3600;
         d.o_sleephrs=(hrs!=null && isFinite(hrs) && hrs>0)?Math.round(hrs*10)/10:(d.o_sleephrs!=null?d.o_sleephrs:null);
+        // extra sleep-tab fields (v5 relay): stages, restlessness, efficiency, midpoint
+        d.o_deep=sd.deep_sleep_hours!=null?sd.deep_sleep_hours:null;
+        d.o_rem=sd.rem_sleep_hours!=null?sd.rem_sleep_hours:null;
+        d.o_light=sd.light_sleep_hours!=null?sd.light_sleep_hours:null;
+        d.o_restless=sd.restless_pct!=null?sd.restless_pct:null;
+        d.o_eff=sd.efficiency!=null?sd.efficiency:null;
+        // sleep midpoint as clock hour (0-24) from bedtime start/end if present
+        if(sd.bedtime_start && sd.bedtime_end){
+          try{ var bs=new Date(sd.bedtime_start), be=new Date(sd.bedtime_end);
+            var mid=new Date((bs.getTime()+be.getTime())/2);
+            d.o_midpoint=mid.getHours()+mid.getMinutes()/60;
+          }catch(e){ d.o_midpoint=null; }
+        }
       });
     }
     // to sorted array
@@ -1375,6 +1388,90 @@
     if(r!=null){var ins=document.createElement("div");ins.className="insight";
       ins.innerHTML="<b>Correlation r = "+r.toFixed(2)+".</b> "+(Math.abs(r)>0.6?"Your two HRV sources track each other closely \u2014 they broadly agree.":Math.abs(r)>0.3?"Moderate agreement \u2014 they move together somewhat but diverge on individual days.":"Weak agreement \u2014 the two devices often tell different stories on a given day, which is exactly why the app leans cautious when they disagree.");
       container.appendChild(ins);}
+  }
+
+  function buildSleep(container,model){
+    destroyCharts();
+    if(!chartsReady()){noChart(container);return;}
+    var rowsB=model.filter(function(d){return d.has;});
+    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    function roll(arr,w){return arr.map(function(_,i){var v=[];for(var k=Math.max(0,i-w+1);k<=i;k++){if(arr[k]!=null)v.push(arr[k]);}return v.length?r1(mean(v)):null;});}
+
+    var withHrs=rowsB.filter(function(d){return d.o_sleephrs!=null;}).length;
+    if(withHrs<2){
+      needSync(container,"No Oura sleep data yet. Tap \u201cSync Oura\u201d at the top \u2014 once it pulls, your sleep charts appear here. (Sleep stages and restlessness need the v5 relay deployed.)");
+      return;
+    }
+
+    // 1) Sleep duration — colour-coded bars + 7-night avg
+    var hrs=rowsB.map(function(d){return d.o_sleephrs!=null?d.o_sleephrs:null;});
+    var cd1=card("Sleep duration","Hours asleep each night. Green \u22657.5h, blue solid, amber/red short. Dotted line is your 7-night average.");
+    var cv1=mkCanvas(cd1,220);container.appendChild(cd1);
+    CHARTS.push(new Chart(cv1,{data:{labels:labels,datasets:[
+      {type:"bar",label:"hours",data:hrs,backgroundColor:hrs.map(function(h){return h==null?C.muted:h>=7.5?C.green:h>=6.5?C.hrv:h>=5.5?C.amber:C.red;}),borderRadius:3,order:2},
+      {type:"line",label:"7-night avg",data:roll(hrs,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
+    ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"hours",color:C.muted}}}},LEG))}));
+
+    // 2) Sleep stages — stacked deep/rem/light (needs v5 relay)
+    var hasStages=rowsB.filter(function(d){return d.o_deep!=null||d.o_rem!=null;}).length>=2;
+    if(hasStages){
+      var cd2=card("Sleep stages","How each night broke down into deep, REM and light sleep (hours). Deep + REM are the restorative stages.");
+      var cv2=mkCanvas(cd2,220);container.appendChild(cd2);
+      CHARTS.push(new Chart(cv2,{type:"bar",data:{labels:labels,datasets:[
+        {label:"Deep",data:rowsB.map(function(d){return d.o_deep;}),backgroundColor:C.r30,borderRadius:2,stack:"s"},
+        {label:"REM",data:rowsB.map(function(d){return d.o_rem;}),backgroundColor:C.hrv,borderRadius:2,stack:"s"},
+        {label:"Light",data:rowsB.map(function(d){return d.o_light;}),backgroundColor:C.line,borderRadius:2,stack:"s"}
+      ]},options:baseOpts(deepMerge({scales:{x:{stacked:true},y:{stacked:true,title:{display:true,text:"hours",color:C.muted}}},plugins:{legend:{display:true,position:"top",labels:{boxWidth:10,font:{size:10},color:C.muted}}}}))}));
+    } else {
+      var cd2b=card("Sleep stages","Deep / REM / light breakdown \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd2b);
+    }
+
+    // 3) Sleep score — colour-coded bars + avg
+    var scr=rowsB.map(function(d){return d.o_sleepscore!=null?d.o_sleepscore:null;});
+    if(scr.filter(function(v){return v!=null;}).length>=2){
+      var cd3=card("Sleep score","Oura's nightly 0\u2013100 quality score. Green \u226585, blue \u226570, amber \u226555. Dotted line is your 7-night average.");
+      var cv3=mkCanvas(cd3,220);container.appendChild(cd3);
+      CHARTS.push(new Chart(cv3,{data:{labels:labels,datasets:[
+        {type:"bar",label:"score",data:scr,backgroundColor:scr.map(function(s){return s==null?C.muted:s>=85?C.green:s>=70?C.hrv:s>=55?C.amber:C.red;}),borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:roll(scr,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{min:40,max:100}}},LEG))}));
+    }
+
+    // 4) Sleep -> next-day HRV — scatter
+    var pts=[];
+    for(var i=0;i<rowsB.length-1;i++){ if(rowsB[i].o_sleephrs!=null && rowsB[i+1].hrv!=null){ pts.push({x:rowsB[i].o_sleephrs,y:rowsB[i+1].hrv}); } }
+    if(pts.length>=4){
+      var cd4=card("Sleep \u2192 next-day HRV","Each dot is a night: hours slept vs your HRV the next morning. Up-and-right means more sleep tends to lift your HRV.");
+      var cv4=mkCanvas(cd4,220);container.appendChild(cd4);
+      CHARTS.push(new Chart(cv4,{type:"scatter",data:{datasets:[{label:"night",data:pts,backgroundColor:C.hrv,pointRadius:5,pointHoverRadius:6}]},
+        options:baseOpts(deepMerge({scales:{x:{title:{display:true,text:"hours slept",color:C.muted},grid:{color:C.line}},y:{title:{display:true,text:"next-day HRV",color:C.muted}}}},{plugins:{legend:{display:false}}}))}));
+    }
+
+    // 5) Sleep efficiency — colour-coded bars + avg
+    var eff=rowsB.map(function(d){return d.o_eff!=null?d.o_eff:null;});
+    if(eff.filter(function(v){return v!=null;}).length>=2){
+      var cd5=card("Sleep efficiency","Percent of time in bed actually asleep. Green \u226590%, blue \u226580%, amber below. Dotted line is your 7-night average.");
+      var cv5=mkCanvas(cd5,220);container.appendChild(cd5);
+      CHARTS.push(new Chart(cv5,{data:{labels:labels,datasets:[
+        {type:"bar",label:"efficiency",data:eff,backgroundColor:eff.map(function(e){return e==null?C.muted:e>=90?C.green:e>=80?C.hrv:C.amber;}),borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:roll(eff,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{min:60,max:100,title:{display:true,text:"%",color:C.muted}}}},LEG))}));
+    } else {
+      var cd5b=card("Sleep efficiency","% of time in bed asleep \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd5b);
+    }
+
+    // 6) Restlessness — colour-coded bars (lower better) + avg
+    var rst=rowsB.map(function(d){return d.o_restless!=null?d.o_restless:null;});
+    if(rst.filter(function(v){return v!=null;}).length>=2){
+      var cd6=card("Restlessness","Percent of the night you were moving/restless \u2014 lower is better. Green \u226415%, blue \u226422%, amber/red as it climbs. Dotted line is your 7-night average.");
+      var cv6=mkCanvas(cd6,220);container.appendChild(cd6);
+      CHARTS.push(new Chart(cv6,{data:{labels:labels,datasets:[
+        {type:"bar",label:"restless %",data:rst,backgroundColor:rst.map(function(r){return r==null?C.muted:r<=15?C.green:r<=22?C.hrv:r<=30?C.amber:C.red;}),borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:roll(rst,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"% restless",color:C.muted}}}},LEG))}));
+    } else {
+      var cd6b=card("Restlessness","How settled your nights are \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd6b);
+    }
   }
 
   function buildOura(container,model){
@@ -2671,7 +2768,7 @@
   var PREVTAB=null;
   var RANGE="14"; // date filter for chart tabs: 7 | 14 | 30 | 90 | 180 | all | custom (default 14d)
   var RFROM="", RTO=""; // custom calendar range (YYYY-MM-DD)
-  var TABS=[["today","Today"],["history","History"],["training","Training"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["hp360","360HP"],["insights","Insights"],["faq","FAQ"]];
+  var TABS=[["today","Today"],["history","History"],["training","Training"],["gymtrends","Gym Trends"],["trends","Trends"],["compare","Compare"],["oura","Oura"],["sleep","Sleep"],["hp360","360HP"],["insights","Insights"],["faq","FAQ"]];
 
   // Full-screen login gate. Shown when team sync is configured, nobody's signed in,
   // and this device has no local data of its own (i.e. a team member's phone).
@@ -3020,11 +3117,20 @@
         today.o_sleepscore!=null?today.o_sleepscore:"\u2014", "Oura sleep",
         "/ 100",
         miniRing(today.o_sleepscore, 70, "high", today.o_sleepscore!=null?today.o_sleepscore/100:0));
-      // Sleep hours — higher better toward 8h; 7.5 neutral anchor
+      // Sleep hours — higher better toward 8h; 7.5 neutral anchor.
+      // Oura's detailed sleep for last night can lag the daily sleep SCORE by a few hours, so if
+      // today's row has no hours yet, fall back to the most recent day that does (and label it).
+      var slpVal=today.o_sleephrs, slpWhen="last night";
+      if(slpVal==null){
+        for(var si=model.length-1; si>=0 && si>=model.length-4; si--){
+          if(model[si].o_sleephrs!=null){ slpVal=model[si].o_sleephrs;
+            slpWhen=(si===model.length-1)?"last night":"most recent"; break; }
+        }
+      }
       cells+=miniCell(
-        today.o_sleephrs!=null?('<span>'+today.o_sleephrs.toFixed(1)+'</span><small>h</small>'):"\u2014", "Sleep time",
-        "last night",
-        miniRing(today.o_sleephrs, 7.5, "high", today.o_sleephrs!=null?Math.min(1,today.o_sleephrs/8.5):0));
+        slpVal!=null?('<span>'+slpVal.toFixed(1)+'</span><small>h</small>'):"\u2014", "Sleep time",
+        slpWhen,
+        miniRing(slpVal, 7.5, "high", slpVal!=null?Math.min(1,slpVal/8.5):0));
       st.innerHTML=cells;
       body.appendChild(st);
 
@@ -3097,6 +3203,7 @@
     else if(TAB==="physio") buildPhysio(body,model);
     else if(TAB==="faq") buildFAQ(body);
     else if(TAB==="oura") buildOura(body,fmodel);
+    else if(TAB==="sleep") buildSleep(body,fmodel);
     else if(TAB==="gymtrends") buildGymTrends(body);
     else if(TAB==="hp360") buildHP360(body,fmodel);
     else if(TAB==="insights") buildInsights(body,fmodel);
