@@ -2075,35 +2075,36 @@
   // Modal: match an unknown sheet name to an existing lift, or keep it new.
   function openExercisePicker(rawName){
     var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;flex-direction:column;padding:18px;overflow:auto;";
-    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
-    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+';">Match \u201c'+rawName+'\u201d</div>'+
-      '<div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Which lift is this the same as? All its past logs and PB will track together.</div>';
-    // candidate list: existing canonicals + distinct history names, with PB + session count
+    function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+    ov.onclick=function(e){ if(e.target===ov) close(); };
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;position:relative;";
+    var xb=document.createElement("button");xb.textContent="\u2715";xb.style.cssText="position:absolute;top:12px;right:12px;background:"+C.panel2+";border:1px solid "+C.line+";color:"+C.ink+";width:32px;height:32px;border-radius:50%;font-size:15px;line-height:1;cursor:pointer;";xb.onclick=close;box.appendChild(xb);
+    var hd=document.createElement("div");hd.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+';padding-right:34px;">Match \u201c'+rawName+'\u201d</div>'+
+      '<div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Which lift is this the same as? All its past logs and PB will track together.</div>';box.appendChild(hd);
     var map=getAliasMap(); var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
     var seen={}; var cands=[];
     Object.keys(map).forEach(function(c){ if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
     hist.forEach(function(l){ var c=canonicalFor(l.exercise)||l.exercise; if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
-    // rank by fuzzy similarity to the raw name
     var n=normEx(rawName);
-    cands.sort(function(a,b){ return matchScore(n,normEx(b))-matchScore(n,normEx(a)); });
+    cands.sort(function(a,b){ var ka=exSortKey(a),kb=exSortKey(b); return ka<kb?-1:ka>kb?1:0; });
     var list=document.createElement("div");
-    cands.slice(0,12).forEach(function(cand){
+    cands.forEach(function(cand){
       if(normEx(cand)===n) return;
       var pb=pbFor(cand); var cnt=historyForCanonical(cand).length;
       var row=document.createElement("div");row.style.cssText="display:flex;justify-content:space-between;align-items:center;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px 12px;margin-bottom:6px;";
       row.innerHTML='<div><div style="font-size:13.5px;font-weight:600;color:'+C.ink+'">'+cand+'</div>'+
         '<div style="font-size:11px;color:'+C.muted+';font-variant-numeric:tabular-nums;">'+(pb?("best "+pb.weight+" \u00b7 "):"")+cnt+' session'+(cnt===1?"":"s")+'</div></div>';
       var use=document.createElement("button");use.className="btn";use.style.cssText="background:"+C.green+";color:#04141A;border:none;border-radius:7px;padding:7px 13px;font-size:12.5px;font-weight:700;";use.textContent="Use";
-      use.onclick=function(){ linkAlias(rawName, cand); document.body.removeChild(ov); render(false); };
+      use.onclick=function(){ linkAlias(rawName, cand); close(); render(false); };
       row.appendChild(use);list.appendChild(row);
     });
     if(!list.children.length){ var none=document.createElement("div");none.style.cssText="font-size:12.5px;color:"+C.muted+";padding:8px 0;";none.textContent="No other exercises logged yet to match against."; list.appendChild(none); }
     box.appendChild(list);
     var keep=document.createElement("button");keep.className="btn btn-ghost";keep.style.cssText="width:100%;margin-top:8px;padding:11px;font-size:13px;";keep.textContent="Keep \u201c"+rawName+"\u201d as its own new exercise";
-    keep.onclick=function(){ registerNewEx(rawName); document.body.removeChild(ov); render(false); };
+    keep.onclick=function(){ registerNewEx(rawName); close(); render(false); };
     box.appendChild(keep);
     var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;font-size:12.5px;color:"+C.muted+";";cancel.textContent="Cancel";
-    cancel.onclick=function(){ dismissSuggestion(rawName); document.body.removeChild(ov); render(false); };
+    cancel.onclick=function(){ dismissSuggestion(rawName); close(); render(false); };
     box.appendChild(cancel);
     ov.appendChild(box);document.body.appendChild(ov);
   }
@@ -2121,7 +2122,7 @@
     });
     var map=getAliasMap();
     Object.keys(map).forEach(function(canon){ var k=normEx(canon); if(!groups[k]) groups[k]={canon:canon, names:{}}; (map[canon]||[]).forEach(function(a){groups[k].names[a]=1;}); });
-    var keys=Object.keys(groups).sort(function(a,b){ return groups[a].canon.toLowerCase()<groups[b].canon.toLowerCase()?-1:1; });
+    var keys=Object.keys(groups).sort(function(a,b){ var ka=exSortKey(groups[a].canon),kb=exSortKey(groups[b].canon); return ka<kb?-1:ka>kb?1:0; });
     if(!keys.length) return;
 
     var lib=document.createElement("div");lib.className="card";lib.style.marginBottom="14px";
@@ -2164,14 +2165,24 @@
     }
     container.appendChild(lib);
   }
+  // natural sort by the trainer's ordering prefix (A1, A2, B1, C3...) then name
+  function exSortKey(name){
+    var m=String(name||"").match(/^\s*([A-Za-z])\s*(\d+)/);
+    if(m){ return m[1].toUpperCase()+String(parseInt(m[2],10)).padStart(3,"0"); }
+    return "ZZZ"+String(name||"").toLowerCase();
+  }
   function openMergeInto(sourceCanon){
     var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
     var seen={},cands=[]; var map=getAliasMap();
     Object.keys(map).forEach(function(c){ if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
     hist.forEach(function(l){ var c=canonicalFor(l.exercise)||l.exercise; if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
+    cands.sort(function(a,b){ var ka=exSortKey(a),kb=exSortKey(b); return ka<kb?-1:ka>kb?1:0; });
     var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;padding:18px;overflow:auto;";
-    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
-    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+'">Merge \u201c'+sourceCanon+'\u201d into\u2026</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;">Pick the lift these are really the same as.</div>';
+    function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+    ov.onclick=function(e){ if(e.target===ov) close(); };
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;position:relative;";
+    var xb=document.createElement("button");xb.textContent="\u2715";xb.style.cssText="position:absolute;top:12px;right:12px;background:"+C.panel2+";border:1px solid "+C.line+";color:"+C.ink+";width:32px;height:32px;border-radius:50%;font-size:15px;line-height:1;cursor:pointer;";xb.onclick=close;box.appendChild(xb);
+    var hd=document.createElement("div");hd.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+';padding-right:34px;">Merge \u201c'+sourceCanon+'\u201d into\u2026</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;">Pick the lift these are really the same as.</div>';box.appendChild(hd);
     cands.filter(function(c){return normEx(c)!==normEx(sourceCanon);}).forEach(function(cand){
       var row=document.createElement("button");row.className="btn btn-ghost";row.style.cssText="display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;font-size:13px;";row.textContent=cand;
       row.onclick=function(){
@@ -2181,28 +2192,31 @@
         if(!m[cand]) m[cand]=[cand];
         srcNames.forEach(function(nm){ if(m[cand].map(normEx).indexOf(normEx(nm))<0) m[cand].push(nm); });
         delete m[sourceCanon];
-        saveAliasMap(m); document.body.removeChild(ov); render(false);
+        saveAliasMap(m); close(); render(false);
       };
       box.appendChild(row);
     });
-    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;color:"+C.muted+";";cancel.textContent="Cancel";cancel.onclick=function(){document.body.removeChild(ov);};
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:11px;color:"+C.muted+";";cancel.textContent="Cancel";cancel.onclick=close;
     box.appendChild(cancel);ov.appendChild(box);document.body.appendChild(ov);
   }
   function openSplit(canon, names){
     var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;padding:18px;overflow:auto;";
-    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
-    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+'">Split \u201c'+canon+'\u201d</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Tap a name to pull it out as its own separate exercise.</div>';
+    function close(){ if(ov.parentNode) document.body.removeChild(ov); }
+    ov.onclick=function(e){ if(e.target===ov) close(); };
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;position:relative;";
+    var xb=document.createElement("button");xb.textContent="\u2715";xb.style.cssText="position:absolute;top:12px;right:12px;background:"+C.panel2+";border:1px solid "+C.line+";color:"+C.ink+";width:32px;height:32px;border-radius:50%;font-size:15px;line-height:1;cursor:pointer;";xb.onclick=close;box.appendChild(xb);
+    var hd=document.createElement("div");hd.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+';padding-right:34px;">Split \u201c'+canon+'\u201d</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Tap a name to pull it out as its own separate exercise.</div>';box.appendChild(hd);
     names.forEach(function(nm){
       if(normEx(nm)===normEx(canon)) return;
       var row=document.createElement("button");row.className="btn btn-ghost";row.style.cssText="display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;font-size:13px;";row.textContent=nm+"  \u2192  its own exercise";
       row.onclick=function(){
         var m=getAliasMap();
         if(m[canon]){ m[canon]=m[canon].filter(function(a){return normEx(a)!==normEx(nm);}); }
-        m[nm]=[nm]; saveAliasMap(m); document.body.removeChild(ov); render(false);
+        m[nm]=[nm]; saveAliasMap(m); close(); render(false);
       };
       box.appendChild(row);
     });
-    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;color:"+C.muted+";";cancel.textContent="Done";cancel.onclick=function(){document.body.removeChild(ov);};
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:11px;color:"+C.muted+";";cancel.textContent="Done";cancel.onclick=close;
     box.appendChild(cancel);ov.appendChild(box);document.body.appendChild(ov);
   }
 
