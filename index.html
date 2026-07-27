@@ -232,6 +232,8 @@
     window.addEventListener("blur", snapshotTrainingNow);
   }
   var K_TOURN="readiness_tournament_v1", K_LOGHIST="readiness_loghist_v1", K_TRAVEL="readiness_travel_v1";
+  var K_EXALIAS="readiness_ex_alias_v1"; // {canonicalName:[alias,...]} — trainer's varied names mapped to one lift
+  var K_EXDISMISS="readiness_ex_dismiss_v1"; // names the user chose to keep as their own new exercise
   var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
   var K_NOTES="readiness_notes_v1";       // per-date free-text notes
   // per-day flags: {tourn:bool, travel:""|"short"|"long"}
@@ -1987,6 +1989,223 @@
     return null;
   }
 
+  // ===== Exercise identity: canonical names + learned aliases =====
+  // Alias map: { canonicalName: [aliasA, aliasB, ...] }. A sheet name resolves to a canonical if it
+  // matches (normalised) the canonical or any of its aliases. Learned once, then remembered.
+  function getAliasMap(){ return getJSON(K_EXALIAS,{}); }
+  function saveAliasMap(m){ setJSON(K_EXALIAS,m); }
+  // canonical name for a raw sheet name, or null if we've never resolved it (→ prompt the user)
+  function canonicalFor(rawName){
+    var n=normEx(rawName); if(!n) return null;
+    var map=getAliasMap();
+    for(var canon in map){
+      if(normEx(canon)===n) return canon;
+      var al=map[canon]||[];
+      for(var i=0;i<al.length;i++){ if(normEx(al[i])===n) return canon; }
+    }
+    return null; // not yet known
+  }
+  // link a raw name to a canonical (creating the canonical if new)
+  function linkAlias(rawName, canonical){
+    var map=getAliasMap();
+    if(!map[canonical]) map[canonical]=[canonical];
+    if(map[canonical].map(normEx).indexOf(normEx(rawName))<0) map[canonical].push(rawName);
+    saveAliasMap(map); 
+  }
+  // register a name as its own new exercise (canonical = itself)
+  function registerNewEx(rawName){ linkAlias(rawName, rawName); }
+  // remember the user dismissed a suggestion for this name (so we don't nag) — but it still needs resolving
+  function dismissSuggestion(rawName){ var d=getJSON(K_EXDISMISS,{}); d[normEx(rawName)]=1; setJSON(K_EXDISMISS,d); }
+  function wasDismissed(rawName){ var d=getJSON(K_EXDISMISS,{}); return !!d[normEx(rawName)]; }
+
+  // best fuzzy suggestion for an unknown name: the canonical (or history name) it most likely equals
+  function suggestCanonical(rawName){
+    var n=normEx(rawName); if(!n) return null;
+    // candidates = existing canonicals + distinct history names
+    var cands={};
+    var map=getAliasMap(); for(var c in map) cands[c]=1;
+    var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
+    hist.forEach(function(l){ if(l.exercise) cands[l.exercise]=1; });
+    var best=null,bestScore=0;
+    Object.keys(cands).forEach(function(cand){
+      if(normEx(cand)===n) return; // identical handled elsewhere
+      var s=matchScore(n, normEx(cand));
+      if(s>bestScore){ bestScore=s; best=canonicalFor(cand)||cand; }
+    });
+    return bestScore>=0.5?best:null;
+  }
+  function matchScore(a,b){
+    if(!a||!b) return 0; if(a===b) return 1;
+    if(a.indexOf(b)>=0||b.indexOf(a)>=0) return 0.85;
+    var aw=a.split(" ").filter(function(w){return w.length>2;});
+    var bw=b.split(" ");
+    if(!aw.length) return 0;
+    var shared=aw.filter(function(w){return bw.indexOf(w)>=0;}).length;
+    return shared/aw.length;
+  }
+
+  // all logged history entries (from the sheet) that belong to a canonical exercise
+  function historyForCanonical(canonical){
+    var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
+    return hist.filter(function(l){
+      var c=canonicalFor(l.exercise);
+      return c ? (normEx(c)===normEx(canonical)) : (normEx(l.exercise)===normEx(canonical));
+    });
+  }
+  // parse a numeric weight from a set cell ("275", "275kg", "X"→null)
+  function setWeight(v){ if(v==null) return null; var m=String(v).match(/-?\d+(\.\d+)?/); return m?parseFloat(m[0]):null; }
+  // PB = heaviest single logged set across all names for this exercise
+  function pbFor(canonical){
+    var h=historyForCanonical(canonical); var best=null, bestVel=null, bestWeek=null;
+    h.forEach(function(l){ (l.sets||[]).forEach(function(s,i){ var w=setWeight(s);
+      if(w!=null && (best==null || w>best)){ best=w; bestWeek=l.week; bestVel=(l.vels&&l.vels[i]!=null)?l.vels[i]:null; }
+    }); });
+    return best==null?null:{weight:best, vel:bestVel, week:bestWeek};
+  }
+  // Previous = the most recent PRIOR week this exercise (any alias) was logged, with its top set
+  function prevFor(canonical, currentOrder){
+    var h=historyForCanonical(canonical).filter(function(l){ return !(currentOrder!=null && l.order!=null && l.order>=currentOrder); });
+    if(!h.length) return null;
+    h.sort(function(a,b){ return (b.order||0)-(a.order||0); });
+    var m=h[0]; var top=null, topVel=null;
+    (m.sets||[]).forEach(function(s,i){ var w=setWeight(s); if(w!=null && (top==null||w>top)){ top=w; topVel=(m.vels&&m.vels[i]!=null)?m.vels[i]:null; } });
+    return {weight:top, vel:topVel, week:m.week, date:m.date, rawName:m.exercise};
+  }
+
+  // Modal: match an unknown sheet name to an existing lift, or keep it new.
+  function openExercisePicker(rawName){
+    var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;flex-direction:column;padding:18px;overflow:auto;";
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
+    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+';">Match \u201c'+rawName+'\u201d</div>'+
+      '<div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Which lift is this the same as? All its past logs and PB will track together.</div>';
+    // candidate list: existing canonicals + distinct history names, with PB + session count
+    var map=getAliasMap(); var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
+    var seen={}; var cands=[];
+    Object.keys(map).forEach(function(c){ if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
+    hist.forEach(function(l){ var c=canonicalFor(l.exercise)||l.exercise; if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
+    // rank by fuzzy similarity to the raw name
+    var n=normEx(rawName);
+    cands.sort(function(a,b){ return matchScore(n,normEx(b))-matchScore(n,normEx(a)); });
+    var list=document.createElement("div");
+    cands.slice(0,12).forEach(function(cand){
+      if(normEx(cand)===n) return;
+      var pb=pbFor(cand); var cnt=historyForCanonical(cand).length;
+      var row=document.createElement("div");row.style.cssText="display:flex;justify-content:space-between;align-items:center;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px 12px;margin-bottom:6px;";
+      row.innerHTML='<div><div style="font-size:13.5px;font-weight:600;color:'+C.ink+'">'+cand+'</div>'+
+        '<div style="font-size:11px;color:'+C.muted+';font-variant-numeric:tabular-nums;">'+(pb?("best "+pb.weight+" \u00b7 "):"")+cnt+' session'+(cnt===1?"":"s")+'</div></div>';
+      var use=document.createElement("button");use.className="btn";use.style.cssText="background:"+C.green+";color:#04141A;border:none;border-radius:7px;padding:7px 13px;font-size:12.5px;font-weight:700;";use.textContent="Use";
+      use.onclick=function(){ linkAlias(rawName, cand); document.body.removeChild(ov); render(false); };
+      row.appendChild(use);list.appendChild(row);
+    });
+    if(!list.children.length){ var none=document.createElement("div");none.style.cssText="font-size:12.5px;color:"+C.muted+";padding:8px 0;";none.textContent="No other exercises logged yet to match against."; list.appendChild(none); }
+    box.appendChild(list);
+    var keep=document.createElement("button");keep.className="btn btn-ghost";keep.style.cssText="width:100%;margin-top:8px;padding:11px;font-size:13px;";keep.textContent="Keep \u201c"+rawName+"\u201d as its own new exercise";
+    keep.onclick=function(){ registerNewEx(rawName); document.body.removeChild(ov); render(false); };
+    box.appendChild(keep);
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;font-size:12.5px;color:"+C.muted+";";cancel.textContent="Cancel";
+    cancel.onclick=function(){ dismissSuggestion(rawName); document.body.removeChild(ov); render(false); };
+    box.appendChild(cancel);
+    ov.appendChild(box);document.body.appendChild(ov);
+  }
+
+  // Exercise library: one row per canonical lift, its PB, and the name variants tracked into it.
+  function buildExerciseLibrary(container){
+    var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
+    var groups={};
+    hist.forEach(function(l){
+      if(!l.exercise) return;
+      var canon=canonicalFor(l.exercise)||l.exercise;
+      var k=normEx(canon);
+      if(!groups[k]) groups[k]={canon:canon, names:{}};
+      groups[k].names[l.exercise]=1;
+    });
+    var map=getAliasMap();
+    Object.keys(map).forEach(function(canon){ var k=normEx(canon); if(!groups[k]) groups[k]={canon:canon, names:{}}; (map[canon]||[]).forEach(function(a){groups[k].names[a]=1;}); });
+    var keys=Object.keys(groups).sort(function(a,b){ return groups[a].canon.toLowerCase()<groups[b].canon.toLowerCase()?-1:1; });
+    if(!keys.length) return;
+
+    var lib=document.createElement("div");lib.className="card";lib.style.marginBottom="14px";
+    var libOpen=getJSON("readiness_lib_open_v1",false);
+    var head=document.createElement("div");head.style.cssText="display:flex;align-items:center;justify-content:space-between;cursor:pointer;";
+    head.innerHTML='<div><div class="ctitle" style="margin:0">Exercise library</div><div class="cnote" style="margin:2px 0 0">'+keys.length+' lifts \u00b7 tap to manage names & PBs</div></div><div style="font-size:20px;color:'+C.muted+'">'+(libOpen?"\u2212":"+")+'</div>';
+    head.onclick=function(){ setJSON("readiness_lib_open_v1",!libOpen); render(false); };
+    lib.appendChild(head);
+
+    if(libOpen){
+      var body=document.createElement("div");body.style.marginTop="10px";
+      keys.forEach(function(k){
+        var g=groups[k]; var pb=pbFor(g.canon); var names=Object.keys(g.names);
+        var row=document.createElement("div");row.style.cssText="padding:11px 0;border-top:1px solid "+C.line+";";
+        var top=document.createElement("div");top.style.cssText="display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+        top.innerHTML='<span style="font-size:14px;font-weight:700;color:'+C.ink+'">'+g.canon+'</span>'+
+          (pb?'<span style="font-size:10px;color:'+C.amber+';font-family:\'IBM Plex Mono\',monospace;border:1px solid '+C.amber+'44;border-radius:20px;padding:2px 8px;">PB '+pb.weight+'</span>':'');
+        row.appendChild(top);
+        if(names.length>1){
+          var chips=document.createElement("div");chips.style.cssText="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px;";
+          names.forEach(function(nm){
+            var chip=document.createElement("span");chip.style.cssText="font-size:11px;color:"+(normEx(nm)===normEx(g.canon)?C.ink:C.muted)+";background:"+C.panel2+";border:1px solid "+C.line+";border-radius:20px;padding:3px 9px;font-family:'IBM Plex Mono',monospace;";
+            chip.textContent=nm; chips.appendChild(chip);
+          });
+          row.appendChild(chips);
+        }
+        var acts=document.createElement("div");acts.style.cssText="display:flex;gap:8px;margin-top:8px;";
+        var merge=document.createElement("button");merge.className="btn btn-ghost";merge.style.cssText="padding:6px 11px;font-size:11.5px;";merge.textContent="Merge into\u2026";
+        merge.onclick=function(){ openMergeInto(g.canon); };
+        acts.appendChild(merge);
+        if(names.length>1){
+          var split=document.createElement("button");split.className="btn btn-ghost";split.style.cssText="padding:6px 11px;font-size:11.5px;color:"+C.muted+";";split.textContent="Split names";
+          split.onclick=function(){ openSplit(g.canon, names); };
+          acts.appendChild(split);
+        }
+        row.appendChild(acts);
+        body.appendChild(row);
+      });
+      lib.appendChild(body);
+    }
+    container.appendChild(lib);
+  }
+  function openMergeInto(sourceCanon){
+    var gym=getJSON(K_GYM,null); var hist=(gym&&gym.history)?gym.history:[];
+    var seen={},cands=[]; var map=getAliasMap();
+    Object.keys(map).forEach(function(c){ if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
+    hist.forEach(function(l){ var c=canonicalFor(l.exercise)||l.exercise; if(!seen[normEx(c)]){seen[normEx(c)]=1;cands.push(c);} });
+    var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;padding:18px;overflow:auto;";
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
+    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+'">Merge \u201c'+sourceCanon+'\u201d into\u2026</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;">Pick the lift these are really the same as.</div>';
+    cands.filter(function(c){return normEx(c)!==normEx(sourceCanon);}).forEach(function(cand){
+      var row=document.createElement("button");row.className="btn btn-ghost";row.style.cssText="display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;font-size:13px;";row.textContent=cand;
+      row.onclick=function(){
+        var m=getAliasMap();
+        var srcNames=(m[sourceCanon]||[sourceCanon]).slice();
+        hist.forEach(function(l){ if((canonicalFor(l.exercise)||l.exercise)===sourceCanon) srcNames.push(l.exercise); });
+        if(!m[cand]) m[cand]=[cand];
+        srcNames.forEach(function(nm){ if(m[cand].map(normEx).indexOf(normEx(nm))<0) m[cand].push(nm); });
+        delete m[sourceCanon];
+        saveAliasMap(m); document.body.removeChild(ov); render(false);
+      };
+      box.appendChild(row);
+    });
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;color:"+C.muted+";";cancel.textContent="Cancel";cancel.onclick=function(){document.body.removeChild(ov);};
+    box.appendChild(cancel);ov.appendChild(box);document.body.appendChild(ov);
+  }
+  function openSplit(canon, names){
+    var ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;background:rgba(2,10,14,0.92);z-index:9999;display:flex;padding:18px;overflow:auto;";
+    var box=document.createElement("div");box.style.cssText="max-width:420px;width:100%;margin:auto;background:"+C.panel+";border:1px solid "+C.line+";border-radius:16px;padding:18px;";
+    box.innerHTML='<div style="font-size:16px;font-weight:700;color:'+C.ink+'">Split \u201c'+canon+'\u201d</div><div style="font-size:12.5px;color:'+C.muted+';margin:4px 0 12px;line-height:1.5;">Tap a name to pull it out as its own separate exercise.</div>';
+    names.forEach(function(nm){
+      if(normEx(nm)===normEx(canon)) return;
+      var row=document.createElement("button");row.className="btn btn-ghost";row.style.cssText="display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:6px;font-size:13px;";row.textContent=nm+"  \u2192  its own exercise";
+      row.onclick=function(){
+        var m=getAliasMap();
+        if(m[canon]){ m[canon]=m[canon].filter(function(a){return normEx(a)!==normEx(nm);}); }
+        m[nm]=[nm]; saveAliasMap(m); document.body.removeChild(ov); render(false);
+      };
+      box.appendChild(row);
+    });
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="width:100%;margin-top:6px;padding:9px;color:"+C.muted+";";cancel.textContent="Done";cancel.onclick=function(){document.body.removeChild(ov);};
+    box.appendChild(cancel);ov.appendChild(box);document.body.appendChild(ov);
+  }
+
   var K_GYMTRENDSEL="readiness_gymtrend_ex_v1"; // remembers the picked exercise
   function buildGymTrends(container){
     destroyCharts();
@@ -1997,6 +2216,8 @@
       needSync(container,"No training history yet. Deploy Apps Script v4 and tap \u201cSync programme\u201d on the Training tab \u2014 these charts read your logged weeks from the sheet.");
       return;
     }
+
+    buildExerciseLibrary(container);
 
     // group history by normalised exercise name; keep display name + records
     var groups={};
@@ -2371,20 +2592,62 @@
           (isLogged?'<span style="font-size:11px;font-weight:700;color:'+C.green+';background:rgba(47,230,176,0.14);padding:4px 10px;border-radius:100px;white-space:nowrap;">\u2713 Logged</span>':'')+
         '</div>'+
         (meta.length?'<div class="cnote" style="margin:3px 0 6px">'+meta.join(" \u00b7 ")+'</div>':'')+
-        (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'')+
-        (ex.last?'<div class="ssrc" style="color:'+C.muted+';margin-bottom:8px">Last time: '+ex.last+'</div>':'');
+        (ex.notes?'<div class="cnote" style="margin:0 0 8px">'+ex.notes+'</div>':'');
+
+      // ----- Exercise identity: resolve this sheet name to a canonical lift -----
+      var canon=canonicalFor(ex.name);
+      if(!canon && !wasDismissed(ex.name)){
+        // unknown name — offer a resolve prompt (canonical + learn aliases)
+        var sug=suggestCanonical(ex.name);
+        var rb=document.createElement("div");rb.style.cssText="background:rgba(47,230,176,0.06);border:1px solid "+C.green+"44;border-radius:10px;padding:11px 12px;margin:2px 0 10px;";
+        if(sug){
+          rb.innerHTML='<div style="font-size:13px;color:'+C.ink+';line-height:1.45;">New exercise name. Looks like your <b style="color:'+C.green+'">'+sug+'</b> \u2014 same lift?</div>';
+          var brow=document.createElement("div");brow.style.cssText="display:flex;gap:7px;flex-wrap:wrap;margin-top:9px;";
+          var yes=document.createElement("button");yes.className="btn";yes.style.cssText="background:"+C.green+";color:#04141A;border:none;border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:700;";yes.textContent="\u2713 Yes, same";
+          yes.onclick=function(){ linkAlias(ex.name, sug); render(false); };
+          var pick=document.createElement("button");pick.className="btn btn-ghost";pick.style.cssText="padding:8px 12px;font-size:12.5px;";pick.textContent="Pick another\u2026";
+          pick.onclick=function(){ openExercisePicker(ex.name); };
+          var neu=document.createElement("button");neu.className="btn btn-ghost";neu.style.cssText="padding:8px 12px;font-size:12.5px;color:"+C.muted+";";neu.textContent="It\u2019s new";
+          neu.onclick=function(){ registerNewEx(ex.name); render(false); };
+          brow.appendChild(yes);brow.appendChild(pick);brow.appendChild(neu);rb.appendChild(brow);
+        } else {
+          rb.innerHTML='<div style="font-size:13px;color:'+C.ink+';line-height:1.45;">First time seeing <b>'+ex.name+'</b>. Match it to an existing lift, or keep it as new.</div>';
+          var brow2=document.createElement("div");brow2.style.cssText="display:flex;gap:7px;flex-wrap:wrap;margin-top:9px;";
+          var pick2=document.createElement("button");pick2.className="btn";pick2.style.cssText="background:"+C.green+";color:#04141A;border:none;border-radius:8px;padding:8px 12px;font-size:12.5px;font-weight:700;";pick2.textContent="Match to a lift\u2026";
+          pick2.onclick=function(){ openExercisePicker(ex.name); };
+          var neu2=document.createElement("button");neu2.className="btn btn-ghost";neu2.style.cssText="padding:8px 12px;font-size:12.5px;color:"+C.muted+";";neu2.textContent="Keep as new";
+          neu2.onclick=function(){ registerNewEx(ex.name); render(false); };
+          brow2.appendChild(pick2);brow2.appendChild(neu2);rb.appendChild(brow2);
+        }
+        c.appendChild(rb);
+      }
+      var canonName=canon||ex.name;
+
+      // ----- Previous + PB strip (Option B) -----
+      var pv=prevFor(canonName, weekOrder(wk.name));
+      var pb=pbFor(canonName);
+      var strip=document.createElement("div");strip.style.cssText="display:flex;gap:8px;margin:2px 0 11px;";
+      function cell(tag,val,sub,isPB){
+        var d=document.createElement("div");
+        d.style.cssText="flex:1;background:"+C.panel2+";border:1px solid "+(isPB?C.amber+"55":C.line)+";border-radius:9px;padding:7px 11px;display:flex;align-items:baseline;gap:8px;";
+        d.innerHTML='<span style="font-size:9px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:'+(isPB?C.amber:C.muted)+'">'+tag+'</span>'+
+          '<span style="font-size:14px;font-weight:700;color:'+C.ink+';font-variant-numeric:tabular-nums;">'+val+'</span>'+
+          (sub?'<span style="font-size:10px;color:'+C.muted+';font-variant-numeric:tabular-nums;">'+sub+'</span>':'');
+        return d;
+      }
+      strip.appendChild(cell("Prev", pv&&pv.weight!=null?pv.weight:"\u2013", (pv&&pv.vel)?(pv.vel+" m/s"):"", false));
+      strip.appendChild(cell("PB", pb&&pb.weight!=null?pb.weight:"\u2013", (pb&&pb.vel)?(pb.vel+" m/s"):"", true));
+      c.appendChild(strip);
+
       // 4 sets, each with a weight input and a velocity input beneath it
-      var prev=findPrevLift(ex.name, weekOrder(wk.name)); // most recent PRIOR week this exercise was done (fuzzy, from sheet history)
       var grid=document.createElement("div");grid.style.cssText="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;";
       var inputs=[]; var vels=[];
       var inpCss="padding:9px 6px;border-radius:8px;border:1px solid "+C.line+";background:"+C.panel2+";color:"+C.ink+";font-size:15px;text-align:center;width:100%;";
-      var prevCss="padding:5px 4px;border-radius:6px;background:"+C.panel+";border:1px dashed "+C.line+";color:"+C.muted+";font-size:12px;text-align:center;width:100%;font-variant-numeric:tabular-nums;";
       var exDraft=getDraft(wk.name, day.label||("Day "+(sel.d+1)), ex.name);
       for(var s=0;s<4;s++){
         var col=document.createElement("div");col.style.cssText="display:flex;flex-direction:column;gap:5px;";
         var slab=document.createElement("div");slab.style.cssText="font-size:10px;color:"+C.muted+";text-align:center;letter-spacing:0.04em;";slab.textContent="Set "+(s+1);
         var inp=document.createElement("input");inp.type="text";inp.setAttribute("inputmode","text");inp.autocapitalize="characters";inp.placeholder="kg or X";
-        // prefer a saved draft (survives app backgrounding), else the sheet's prefilled value
         var draftW=(exDraft&&exDraft.w&&exDraft.w[s]!=null&&exDraft.w[s]!=="")?exDraft.w[s]:null;
         inp.value=draftW!=null?draftW:((ex.vals&&ex.vals[s])?ex.vals[s]:"");inp.style.cssText=inpCss;
         var vel=document.createElement("input");vel.type="text";vel.inputMode="decimal";vel.placeholder="m/s";
@@ -2395,18 +2658,15 @@
           vel.addEventListener("input",function(){ var d=getDraft(wk.name,day.label||("Day "+(sel.d+1)),exName)||{w:["","","",""],v:["","","",""]}; d.v=d.v||["","","",""]; d.v[si]=vel.value; saveDraft(wk.name,day.label||("Day "+(sel.d+1)),exName,{v:d.v}); });
         })(s, ex.name);
         vel.style.cssText=inpCss+"border-color:"+C.glow+"44;";
-        // previous-time read-only cells (weight then velocity) for this set
-        var pw=(prev&&prev.weights&&prev.weights[s])?prev.weights[s]:"";
-        var pvArr=(prev&&prev.vels)?prev.vels:null;
-        var pv=(pvArr&&pvArr[s])?pvArr[s]:"";
-        var pwCell=document.createElement("div");pwCell.style.cssText=prevCss;pwCell.textContent=pw!==""&&pw!=0?("prev "+pw):"prev \u2013";
-        var pvCell=document.createElement("div");pvCell.style.cssText=prevCss+"color:"+C.glow+"99;";pvCell.textContent=pv!==""&&pv!=0?("prev "+pv):"prev \u2013";
-        col.appendChild(slab);col.appendChild(inp);col.appendChild(pwCell);col.appendChild(vel);col.appendChild(pvCell);
+        col.appendChild(slab);col.appendChild(inp);col.appendChild(vel);
         grid.appendChild(col);inputs.push(inp);vels.push(vel);
       }
       c.appendChild(grid);
-      var prevNote=prev?("Prev cells = your last logged "+ex.name+(normEx(prev.exercise)!==normEx(ex.name)?" (matched \u201c"+prev.exercise+"\u201d)":"")+" on "+prev.date+"."):"No previous log found for this exercise yet.";
-      var vhint=document.createElement("div");vhint.className="ssrc";vhint.style.cssText="color:"+C.muted+";margin-top:6px;line-height:1.4;";vhint.textContent="Weight (kg) / velocity (m/s), with your previous values beneath each. "+prevNote;
+      var pnote="";
+      if(pv){ pnote="Prev = your top set from "+(pv.week||"a previous week")+(normEx(pv.rawName)!==normEx(canonName)?" (logged as \u201c"+pv.rawName+"\u201d)":"")+". "; }
+      else { pnote="No previous log for this lift yet. "; }
+      if(pb) pnote+="PB = heaviest single set ("+pb.weight+(pb.week?", "+pb.week:"")+").";
+      var vhint=document.createElement("div");vhint.className="ssrc";vhint.style.cssText="color:"+C.muted+";margin-top:6px;line-height:1.4;";vhint.textContent="Weight (kg) / velocity (m/s) per set. "+pnote;
       c.appendChild(vhint);
 
       // Done checkbox
@@ -2720,7 +2980,9 @@
           flags:getJSON(K_FLAGHIST,{}),            // tournament / travel per day
           notes:getJSON(K_NOTES,{}),               // your own per-day notes
           logHist:getJSON(K_LOGHIST,[]),           // sessions logged in-app (+velocities)
-          gymCache:getJSON(K_GYM,null)             // cached programme
+          gymCache:getJSON(K_GYM,null),            // cached programme
+          exAlias:getJSON(K_EXALIAS,{}),           // canonical exercise names + learned aliases
+          exDismiss:getJSON(K_EXDISMISS,{})        // names kept as their own exercise
         },
         computed:{
           // the scored model — every day's score/band/why, so the snapshot is readable
