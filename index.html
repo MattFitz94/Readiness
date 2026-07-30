@@ -162,7 +162,38 @@
   var K_ROWS="readiness_360hp_rows_v1", K_OURA="readiness_oura_cache_v1", K_OURATIME="readiness_oura_time_v1";
   var K_GYM="readiness_gym_cache_v1", K_GYMTIME="readiness_gym_time_v1", K_GYMSEL="readiness_gym_sel_v1";
   var K_TRAINDRAFT="readiness_train_draft_v1"; // auto-saved set values so backgrounding can't lose them
-  var K_SCORELOCK="readiness_scorelock_v1"; // {iso: {score,band,comp,confidence}} — freezes the morning score for the day
+  var K_SCORELOCK_OLD="readiness_scorelock_v1"; // legacy: only ever held TODAY, wiped daily
+  var K_SCORELOCK="readiness_scorelock_v2";     // {iso:{score,band,comp,confidence,lockedAt,src}} — PERMANENT per-date record
+
+  // ===== SCORE LOCKS =====================================================
+  // A readiness score is a MORNING reading. Once a day's score is taken it is written
+  // here and never recomputed again — not later that day, not tomorrow, not next year.
+  // Nothing in this store is ever wiped by the passage of time; the only things that
+  // clear a lock are an explicit re-take (new 360HP CSV for today) or a manual fix.
+  //   src: "morning"  = locked from complete morning data (360HP CSV in + Oura synced)
+  //        "eod"      = day ended without a complete morning read; locked as-is so it stops drifting
+  //        "backfill" = pre-existing history, frozen at whatever it read when v15 first ran
+  //        "manual"   = you set it by hand (e.g. from a screenshot)
+  function isoToday(){ return new Date().toISOString().slice(0,10); }
+  function getLocks(){
+    var v2=getJSON(K_SCORELOCK,null);
+    if(v2) return v2;
+    var v1=getJSON(K_SCORELOCK_OLD,null); // one-time migration: rescue today's old lock
+    var out={};
+    if(v1){ for(var k in v1){ if(v1[k]&&v1[k].score!=null){ out[k]=Object.assign({src:"morning"},v1[k]); } } }
+    setJSON(K_SCORELOCK,out);
+    return out;
+  }
+  function saveLocks(l){ setJSON(K_SCORELOCK,l); }
+  function setLock(iso,obj){ var l=getLocks(); l[iso]=obj; saveLocks(l); return l; }
+  function clearLock(iso){ var l=getLocks(); delete l[iso]; saveLocks(l); return l; }
+  // Today is only locked once the real morning inputs are actually present:
+  // the 360HP reading (the CSV) AND something from Oura for that date.
+  function morningDataComplete(row){
+    var hp = row.hp_hrv!=null || row.hp_subjective!=null;
+    var oura = row.o_hrv!=null || row.o_readiness!=null || row.o_sleepscore!=null || row.o_rhr!=null || row.o_sleephrs!=null;
+    return hp && oura;
+  }
   // draft key = week||day||exercise; stores {w:[4 weights], v:[4 vels], done:bool}
   function draftKey(week,day,exName){ return week+"||"+day+"||"+exName; }
   function getDraft(week,day,exName){ var all=getJSON(K_TRAINDRAFT,{}); return all[draftKey(week,day,exName)]||null; }
@@ -236,6 +267,43 @@
   var K_EXDISMISS="readiness_ex_dismiss_v1"; // names the user chose to keep as their own new exercise
   var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
   var K_NOTES="readiness_notes_v1";       // per-date free-text notes
+  var K_NIGGLES="readiness_niggles_v1";   // your own body niggles / injuries, tracked over time
+
+  // ===== NIGGLES =========================================================
+  // Your private running record of anything sore. Stored on this device (so it works with
+  // or without team sync) and included in "Back up everything". Each entry keeps a history
+  // of severity check-ins, so you can see whether something is settling or creeping.
+  var NIGGLE_AREAS=["Lower back","Upper back","Neck","Shoulder","Elbow","Wrist / hand",
+    "Hip","Glute","Hamstring","Quad","Groin","Knee","Calf","Achilles","Ankle / foot","Ribs","Other"];
+  function getNiggles(){ var n=getJSON(K_NIGGLES,[]); return Array.isArray(n)?n:[]; }
+  function saveNiggles(n){ setJSON(K_NIGGLES,n); }
+  function addNiggle(area,side,sev,note){
+    var n=getNiggles();
+    var today=isoToday();
+    n.unshift({ id:"ng_"+Date.now(), area:area, side:side||"", started:today, status:"active",
+      sev:Number(sev), note:note||"", history:[{date:today,sev:Number(sev),note:note||""}] });
+    saveNiggles(n); return n;
+  }
+  function updateNiggle(id,sev,note){
+    var n=getNiggles();
+    for(var i=0;i<n.length;i++){ if(n[i].id===id){
+      n[i].sev=Number(sev);
+      n[i].history=(n[i].history||[]).concat([{date:isoToday(),sev:Number(sev),note:note||""}]);
+      if(note) n[i].note=note;
+      break; } }
+    saveNiggles(n); return n;
+  }
+  function setNiggleStatus(id,status){
+    var n=getNiggles();
+    for(var i=0;i<n.length;i++){ if(n[i].id===id){ n[i].status=status;
+      n[i].resolvedOn=(status==="resolved")?isoToday():null; break; } }
+    saveNiggles(n); return n;
+  }
+  function deleteNiggle(id){ saveNiggles(getNiggles().filter(function(x){return x.id!==id;})); }
+  function activeNiggles(){ return getNiggles().filter(function(x){return x.status!=="resolved";}); }
+  function daysSince(iso){
+    try{ return Math.max(0,Math.round((Date.now()-new Date(iso+"T00:00:00").getTime())/86400000)); }catch(e){ return 0; }
+  }
   // per-day flags: {tourn:bool, travel:""|"short"|"long"}
   function getFlags(iso){ var fh=getJSON(K_FLAGHIST,{}); return fh[iso]||{}; }
   function setFlag(iso,kind,val){
@@ -451,7 +519,18 @@
         d.o_deep=sd.deep_sleep_hours!=null?sd.deep_sleep_hours:null;
         d.o_rem=sd.rem_sleep_hours!=null?sd.rem_sleep_hours:null;
         d.o_light=sd.light_sleep_hours!=null?sd.light_sleep_hours:null;
-        d.o_restless=sd.restless_pct!=null?sd.restless_pct:null;
+        // Restlessness: relays send this three different ways and they point in OPPOSITE
+        // directions, so record which one we got rather than assuming a percentage.
+        //   pct         = % of the night moving        -> LOWER is better (typ. 8-35)
+        //   count       = number of restless periods   -> LOWER is better (typ. 10-70)
+        //   restfulness = Oura's contributor score     -> HIGHER is better (typ. 55-95)
+        d.o_restless=null; d.o_restlessKind=null;
+        if(sd.restless_pct!=null){ d.o_restless=sd.restless_pct; d.o_restlessKind="pct"; }
+        else if(sd.restless_percent!=null){ d.o_restless=sd.restless_percent; d.o_restlessKind="pct"; }
+        else if(sd.restfulness!=null){ d.o_restless=sd.restfulness; d.o_restlessKind="restfulness"; }
+        else if(sd.restfulness_score!=null){ d.o_restless=sd.restfulness_score; d.o_restlessKind="restfulness"; }
+        else if(sd.restless_periods!=null){ d.o_restless=sd.restless_periods; d.o_restlessKind="count"; }
+        else if(sd.restlessness!=null){ d.o_restless=sd.restlessness; d.o_restlessKind="pct"; }
         d.o_eff=sd.efficiency!=null?sd.efficiency:null;
         // sleep midpoint as clock hour (0-24) from bedtime start/end if present
         if(sd.bedtime_start && sd.bedtime_end){
@@ -1151,30 +1230,45 @@
       var band = res.band==="amber" ? "yellow" : res.band;
       var score100 = res.score!=null ? res.score : 0;
 
-      // FREEZE today's score: a readiness score is a morning reading and must not drift during
-      // the day as Oura re-syncs or the baseline shifts. The first score computed for a given
-      // date is locked and reused all day. (Past days are historical and never locked here.)
-      var _todayIso=new Date().toISOString().slice(0,10);
-      if(row.iso===_todayIso && res.score!=null){
+      // FREEZE the score. Once a date has a lock, that IS the score for that date, for ever.
+      // A locked day is never recomputed — late Oura re-syncs, a shifting baseline or a
+      // later CSV import can no longer move a number you already read that morning.
+      // Today locks as soon as the real morning inputs are in (360HP + Oura); a day that
+      // ends without them locks anyway at rollover so nothing is left free to drift.
+      var _todayIso=isoToday();
+      var _locked=false, _provisional=false;
+      if(res.score!=null && !isViewer()){
         try{
-          var locks=getJSON(K_SCORELOCK,{});
-          if(locks[_todayIso] && locks[_todayIso].score!=null){
-            // reuse the locked morning values
-            score100=locks[_todayIso].score;
-            if(locks[_todayIso].band) band=locks[_todayIso].band;
-          } else {
-            // first compute of the day — lock it
-            locks={}; // keep only today's lock, drop old dates
-            locks[_todayIso]={score:score100, band:band, comp:(res.comp!=null?res.comp:0), confidence:(res.confidence?res.confidence.level:"low")};
-            setJSON(K_SCORELOCK,locks);
+          var locks=getLocks();
+          var L=locks[row.iso];
+          if(L && L.score!=null){
+            score100=L.score;                 // the morning reading wins, always
+            if(L.band) band=L.band;
+            _locked=true;
+          } else if(row.iso===_todayIso){
+            if(morningDataComplete(row)){
+              locks[row.iso]={score:score100, band:band, comp:(res.comp!=null?res.comp:0),
+                confidence:(res.confidence?res.confidence.level:"low"),
+                lockedAt:new Date().toISOString(), src:"morning"};
+              saveLocks(locks); _locked=true;
+            } else {
+              _provisional=true;              // waiting on the CSV / Oura — this number can still move
+            }
+          } else if(row.iso<_todayIso){
+            // any past day with no lock: freeze it now so it can never change again
+            locks[row.iso]={score:score100, band:band, comp:(res.comp!=null?res.comp:0),
+              confidence:(res.confidence?res.confidence.level:"low"),
+              lockedAt:new Date().toISOString(), src:"backfill"};
+            saveLocks(locks); _locked=true;
           }
         }catch(e){}
-      }
+      } else if(isViewer() && res.score!=null){ _locked=true; }
 
       return Object.assign({},row,{
         hrv:hrv,hrvSrc:hrvSrc,hBase:hBase,hSd:hSd,hDev:hDev,
         rhr:rhr,rBase:rBase,roll7:roll7,roll30:roll30,
         comp:res.comp!=null?res.comp:0, score100:score100, band:band,
+        locked:_locked, provisional:_provisional,
         reasons:reasons, confidence:(res.confidence?res.confidence.level:"low"),
         v2:res, has:(hrv!=null||row.hp_hrv!=null||row.o_hrv!=null||row.hp_subjective!=null),
         travel:(getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"",
@@ -1263,10 +1357,51 @@
   // ---------- chart helpers ----------
   var CHARTS=[];
   function destroyCharts(){CHARTS.forEach(function(c){try{c.destroy();}catch(e){}});CHARTS=[];}
+  // Dismissing the value pop-up. Chart.js leaves a touched tooltip on screen until you touch
+  // another point on the SAME canvas, which on a phone means it sits over the graph you're
+  // trying to read. So: tapping the same point again closes it, and tapping anywhere off a
+  // chart closes every open one.
+  function clearChartTooltips(except){
+    CHARTS.forEach(function(c){
+      if(!c || c===except) return;
+      try{
+        if(c.tooltip){ c.tooltip.setActiveElements([],{x:0,y:0}); }
+        c.setActiveElements([]);
+        c.update("none");
+      }catch(e){}
+    });
+  }
+  function tooltipIsOpen(c){
+    try{ return !!(c.tooltip && c.tooltip.getActiveElements && c.tooltip.getActiveElements().length); }catch(e){ return false; }
+  }
+  // one global listener, added once — any tap that isn't on a canvas closes the pop-ups
+  if(!window.__ttDismissWired){
+    window.__ttDismissWired=true;
+    ["touchstart","mousedown"].forEach(function(ev){
+      document.addEventListener(ev,function(e){
+        var t=e.target;
+        if(t && t.tagName && t.tagName.toLowerCase()==="canvas") return; // let the chart handle it
+        clearChartTooltips(null);
+      },{passive:true});
+    });
+  }
   function mkCanvas(p,h){var w=document.createElement("div");w.className="cwrap";w.style.height=h+"px";var cv=document.createElement("canvas");w.appendChild(cv);p.appendChild(w);return cv;}
   function card(t,n){var d=document.createElement("div");d.className="card";var x=document.createElement("div");x.className="ctitle";x.textContent=t;d.appendChild(x);if(n){var y=document.createElement("div");y.className="cnote";y.textContent=n;d.appendChild(y);}return d;}
   function baseOpts(extra){var o={responsive:true,maintainAspectRatio:false,interaction:{intersect:false,mode:"index"},
     plugins:{legend:{display:false},tooltip:{backgroundColor:C.panel2,borderColor:C.line,borderWidth:1,titleColor:C.muted,bodyColor:C.ink}},
+    onClick:function(evt,els,chart){
+      // close any pop-up open on another chart
+      clearChartTooltips(chart);
+      // tapping the same spot again dismisses it
+      var open=tooltipIsOpen(chart);
+      if(open && (!els || !els.length)){ clearChartTooltips(null); return; }
+      if(open && els && els.length){
+        var cur=chart.tooltip.getActiveElements();
+        if(cur.length && cur[0].index===els[0].index && cur[0].datasetIndex===els[0].datasetIndex){
+          try{ chart.tooltip.setActiveElements([],{x:0,y:0}); chart.setActiveElements([]); chart.update("none"); }catch(e){}
+        }
+      }
+    },
     scales:{x:{grid:{color:C.line,drawTicks:false},ticks:{color:C.muted,maxRotation:0,autoSkip:true,maxTicksLimit:6},border:{color:C.line}},
             y:{grid:{color:C.line,drawTicks:false},ticks:{color:C.muted},border:{display:false}}}};
     if(extra) deepMerge(o,extra); return o;}
@@ -1414,7 +1549,7 @@
       {type:"line",label:"7-night avg",data:roll(hrs,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
     ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"hours",color:C.muted}}}},LEG))}));
 
-    // 2) Sleep stages — stacked deep/rem/light (needs v5 relay)
+    // 2) Sleep stages — nightly stacked bars + a 7-night rolling average per stage (needs v5 relay)
     var hasStages=rowsB.filter(function(d){return d.o_deep!=null||d.o_rem!=null;}).length>=2;
     if(hasStages){
       var cd2=card("Sleep stages","How each night broke down into deep, REM and light sleep (hours). Deep + REM are the restorative stages.");
@@ -1424,6 +1559,18 @@
         {label:"REM",data:rowsB.map(function(d){return d.o_rem;}),backgroundColor:C.hrv,borderRadius:2,stack:"s"},
         {label:"Light",data:rowsB.map(function(d){return d.o_light;}),backgroundColor:C.line,borderRadius:2,stack:"s"}
       ]},options:baseOpts(deepMerge({scales:{x:{stacked:true},y:{stacked:true,title:{display:true,text:"hours",color:C.muted}}},plugins:{legend:{display:true,position:"top",labels:{boxWidth:10,font:{size:10},color:C.muted}}}}))}));
+
+      // rolling trend: one 7-night average line per stage, so you see the direction not the noise
+      var dpR=roll(rowsB.map(function(d){return d.o_deep!=null?d.o_deep:null;}),7);
+      var rmR=roll(rowsB.map(function(d){return d.o_rem!=null?d.o_rem:null;}),7);
+      var ltR=roll(rowsB.map(function(d){return d.o_light!=null?d.o_light:null;}),7);
+      var cd2r=card("Sleep stages \u2014 7-night rolling average","The same three stages smoothed over 7 nights. One rough night barely moves these lines, so a real drift up or down is a real change. Deep falling while light rises is the classic under-recovery pattern.");
+      var cv2r=mkCanvas(cd2r,220);container.appendChild(cd2r);
+      CHARTS.push(new Chart(cv2r,{data:{labels:labels,datasets:[
+        {type:"line",label:"Deep (7n)",data:dpR,borderColor:C.r30,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true},
+        {type:"line",label:"REM (7n)",data:rmR,borderColor:C.hrv,borderWidth:2.4,pointRadius:0,tension:0.35,spanGaps:true},
+        {type:"line",label:"Light (7n)",data:ltR,borderColor:C.muted,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"hours",color:C.muted}}},plugins:{legend:{display:true,position:"top",labels:{boxWidth:10,font:{size:10},color:C.muted}}}}))}));
     } else {
       var cd2b=card("Sleep stages","Deep / REM / light breakdown \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd2b);
     }
@@ -1470,15 +1617,45 @@
       var cd5b=card("Sleep efficiency","% of time in bed asleep \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd5b);
     }
 
-    // 6) Restlessness — colour-coded bars (lower better) + avg
+    // 6) Restlessness / restfulness — direction detected from the data, not assumed.
+    // A "restless %" of 70 and a "restfulness score" of 70 mean opposite things; the old
+    // chart treated everything as restless-%, so a good restfulness score painted red.
     var rst=rowsB.map(function(d){return d.o_restless!=null?d.o_restless:null;});
-    if(rst.filter(function(v){return v!=null;}).length>=2){
-      var cd6=card("Restlessness","Percent of the night you were moving/restless \u2014 lower is better. Green \u226415%, blue \u226422%, amber/red as it climbs. Dotted line is your 7-night average.");
+    var rstVals=rst.filter(function(v){return v!=null;});
+    if(rstVals.length>=2){
+      var kinds={}; rowsB.forEach(function(d){ if(d.o_restlessKind) kinds[d.o_restlessKind]=1; });
+      var kind=Object.keys(kinds)[0]||"pct";
+      var med=median(rstVals.slice().sort(function(a,b){return a-b;}));
+      // sanity override: a "percentage of the night spent restless" that typically sits
+      // above 55 is not a restless percentage — it's a restfulness score wearing the wrong label.
+      var flipped=false;
+      if(kind==="pct" && med>=55){ kind="restfulness"; flipped=true; }
+      if(kind==="pct" && med>40 && Math.max.apply(null,rstVals)>100){ kind="count"; }
+
+      var title,sub,colFn,axis;
+      if(kind==="restfulness"){
+        title="Restfulness";
+        sub="Oura's restfulness score \u2014 <b>higher is better</b>. Green \u226585, blue \u226570, amber \u226555. Dotted line is your 7-night average."+
+          (flipped?" <b style='color:"+C.amber+"'>Note:</b> your relay labels this as \u201crestless %\u201d but the values are a restfulness score, so it's now read and coloured the right way round.":"");
+        colFn=function(v){ return v==null?C.muted:v>=85?C.green:v>=70?C.hrv:v>=55?C.amber:C.red; };
+        axis="restfulness";
+      } else if(kind==="count"){
+        title="Restless periods";
+        sub="How many times you stirred in the night \u2014 <b>lower is better</b>. Coloured against your own average rather than a fixed cutoff, since there's no universal \u201cgood\u201d count. Dotted line is your 7-night average.";
+        colFn=function(v){ return v==null?C.muted:v<=med*0.8?C.green:v<=med*1.05?C.hrv:v<=med*1.3?C.amber:C.red; };
+        axis="periods";
+      } else {
+        title="Restlessness";
+        sub="Percent of the night you were moving \u2014 <b>lower is better</b>. Green \u226415%, blue \u226422%, amber/red as it climbs. Dotted line is your 7-night average.";
+        colFn=function(v){ return v==null?C.muted:v<=15?C.green:v<=22?C.hrv:v<=30?C.amber:C.red; };
+        axis="% restless";
+      }
+      var cd6=card(title,sub);
       var cv6=mkCanvas(cd6,220);container.appendChild(cd6);
       CHARTS.push(new Chart(cv6,{data:{labels:labels,datasets:[
-        {type:"bar",label:"restless %",data:rst,backgroundColor:rst.map(function(r){return r==null?C.muted:r<=15?C.green:r<=22?C.hrv:r<=30?C.amber:C.red;}),borderRadius:3,order:2},
+        {type:"bar",label:axis,data:rst,backgroundColor:rst.map(colFn),borderRadius:3,order:2},
         {type:"line",label:"7-night avg",data:roll(rst,7),borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
-      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:"% restless",color:C.muted}}}},LEG))}));
+      ]},options:baseOpts(deepMerge({scales:{y:{title:{display:true,text:axis,color:C.muted}}}},LEG))}));
     } else {
       var cd6b=card("Restlessness","How settled your nights are \u2014 appears once the v5 relay is deployed and you re-sync.");container.appendChild(cd6b);
     }
@@ -1500,9 +1677,16 @@
     ],deepMerge({scales:{y:{min:40,max:100,position:"left"},y1:{position:"right",grid:{drawOnChartArea:false}}}},LEG),200);
 
     var hasSleep=rowsB.filter(function(d){return d.o_sleepscore!=null;}).length>=2;
-    if(hasSleep) lineChart(container,"Oura sleep score","Your nightly sleep quality score from Oura.",labels,[
-      {label:"sleep",data:rowsB.map(function(d){return d.o_sleepscore;}),borderColor:C.r30,borderWidth:2.2,pointRadius:0,tension:0.3}
-    ],{scales:{y:{min:0,max:100}}});
+    if(hasSleep){
+      var sVals=rowsB.map(function(d){return d.o_sleepscore!=null?d.o_sleepscore:null;});
+      var sRoll=sVals.map(function(_,i){var w=[];for(var k=Math.max(0,i-6);k<=i;k++){if(sVals[k]!=null)w.push(sVals[k]);}return w.length?r1(mean(w)):null;});
+      var cdS=card("Oura sleep score","Each bar is one night's quality score. Green \u226585, blue \u226570, amber \u226555, red below. The dotted line is your 7-night rolling average \u2014 that's the one to read, single nights bounce around.");
+      var cvS=mkCanvas(cdS,210);container.appendChild(cdS);
+      CHARTS.push(new Chart(cvS,{data:{labels:labels,datasets:[
+        {type:"bar",label:"sleep score",data:sVals,backgroundColor:sVals.map(function(s){return s==null?C.muted:s>=85?C.green:s>=70?C.hrv:s>=55?C.amber:C.red;}),borderRadius:3,order:2},
+        {type:"line",label:"7-night avg",data:sRoll,borderColor:C.glow,borderWidth:2,borderDash:[5,4],pointRadius:0,tension:0.35,order:1,spanGaps:true}
+      ]},options:baseOpts(deepMerge({scales:{y:{min:40,max:100}}},LEG))}));
+    }
 
     // body temperature — diverging bars from zero, colour-coded, with a rolling-average line
     var hasTemp=rowsB.filter(function(d){return d.o_tempdev!=null;}).length>=2;
@@ -1599,16 +1783,9 @@
       ]},options:baseOpts(deepMerge({scales:{y:{min:0,max:10,title:{display:true,text:"score",color:C.muted}}}},LEG))}));
     })();
 
-    // ---- B1: All 5 self-ratings over time (1-4) ----
-    (function(){
-      var fields=[["hp_sleep","Sleep",C.hrv],["hp_energy","Energy",C.green],["hp_diet","Diet",C.amber],["hp_exercise","Exercise",C.r30],["hp_happiness","Happiness",C.glow]];
-      var any=fields.some(function(f){return rowsB.filter(function(d){return d[f[0]]!=null;}).length>=2;});
-      if(!any) return;
-      var ds=fields.map(function(f){return {label:f[1],data:rowsB.map(function(d){return d[f[0]]!=null?d[f[0]]:null;}),borderColor:f[2],backgroundColor:"transparent",borderWidth:2,pointRadius:0,tension:0.35,spanGaps:true};});
-      var cd=card("Wellness self-ratings (1\u20134)","Your five daily 360HP ratings over time \u2014 sleep, energy, diet, exercise, happiness.");
-      var cv=mkCanvas(cd,240);container.appendChild(cd);
-      CHARTS.push(new Chart(cv,{type:"line",data:{labels:labels,datasets:ds},options:baseOpts(deepMerge({scales:{y:{min:1,max:4,ticks:{stepSize:1}}}},LEG))}));
-    })();
+    // ---- B1 removed: the five-line "Wellness self-ratings (1-4)" chart was too busy to read.
+    // The same information is carried more usefully by the Subjective wellbeing chart above
+    // and the Wellness balance radar below. ----
 
     // ---- A1: How you feel vs your objective score (over time, dual axis) ----
     (function(){
@@ -1635,7 +1812,7 @@
       var cv=mkCanvas(cd,260);container.appendChild(cd);
       CHARTS.push(new Chart(cv,{type:"radar",data:{labels:fields.map(function(f){return f[1];}),datasets:[
         {label:"avg (1-4)",data:avgs.map(function(v){return v!=null?r1(v):null;}),borderColor:C.glow,backgroundColor:C.glow+"33",borderWidth:2,pointBackgroundColor:C.glow}
-      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{r:{min:0,max:4,ticks:{stepSize:1,color:C.muted,backdropColor:"transparent"},grid:{color:C.line},angleLines:{color:C.line},pointLabels:{color:C.ink,font:{size:12}}}}}}));
+      ]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},onClick:function(evt,els,chart){clearChartTooltips(chart);if(tooltipIsOpen(chart)&&(!els||!els.length)){clearChartTooltips(null);}},scales:{r:{min:0,max:4,ticks:{stepSize:1,color:C.muted,backdropColor:"transparent"},grid:{color:C.line},angleLines:{color:C.line},pointLabels:{color:C.ink,font:{size:12}}}}}}));
     })();
 
     // ---- A3: Which factor tracks your HRV best? (correlation bars) ----
@@ -1786,7 +1963,8 @@
       var g=last7.filter(function(d){return d.band==="green";}).length;
       var y=last7.filter(function(d){return d.band==="yellow";}).length;
       var rd=last7.filter(function(d){return d.band==="red";}).length;
-      var wc=card("This week","Your last "+last7.length+" days at a glance.");
+      var wc=card("This week","A summary of your last "+last7.length+" days \u2014 not a new score, just your recent daily readings gathered in one place.");
+
       var row=document.createElement("div");row.className="weekrow";
       row.innerHTML="<span>Signal mix</span><span>"+
         '<span class="chip" style="background:'+C.green+'"></span>'.repeat(g)+
@@ -1794,10 +1972,31 @@
         '<span class="chip" style="background:'+C.red+'"></span>'.repeat(rd)+
         "</span>";
       wc.appendChild(row);
+      var mixNote=document.createElement("div");mixNote.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;margin:6px 2px 0;";
+      mixNote.innerHTML="One dot per day: <b style='color:"+C.green+"'>"+g+" green</b> (ready to push), <b style='color:"+C.amber+"'>"+y+" amber</b> (moderate), <b style='color:"+C.red+"'>"+rd+" red</b> (recover). "+
+        (rd>=3?"Three or more reds in a week means the hole isn\u2019t being filled \u2014 the week needs an easier block, not a harder one.":
+         g>=4?"A green-heavy week means you\u2019ve been absorbing the work well and can afford to load up.":
+         "A normal week looks like a mix \u2014 a few greens to push on, some amber days for skills and technical work.");
+      wc.appendChild(mixNote);
+
       var r7now=last7[last7.length-1].roll7, r30now=last7[last7.length-1].roll30;
-      if(r7now!=null&&r30now!=null){var tr=document.createElement("div");tr.className="weekrow";
+      if(r7now!=null&&r30now!=null){
+        var pctTr=Math.round((r7now/r30now-1)*100);
+        var tr=document.createElement("div");tr.className="weekrow";tr.style.marginTop="10px";
         tr.innerHTML="<span>Fatigue trend</span><span style='color:"+(r7now>=r30now?C.green:C.amber)+"'>"+(r7now>=r30now?"absorbing load well":"load building \u2014 watch it")+"</span>";
-        wc.appendChild(tr);}
+        wc.appendChild(tr);
+        var trNote=document.createElement("div");trNote.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;margin:6px 2px 0;";
+        trNote.innerHTML="This compares your <b>last 7 days</b> of HRV against your <b>last 30</b>: "+Math.round(r7now)+" ms vs "+Math.round(r30now)+" ms, "+
+          (pctTr>=0?"+":"")+pctTr+"%. "+
+          (r7now>=r30now
+            ? "Your recent week is at or above your monthly normal, which means the training you\u2019re doing is being absorbed rather than accumulating."
+            : "Your recent week is running below your monthly normal. That gap is fatigue stacking up quietly \u2014 it usually shows here before you feel it, so it\u2019s a cue to take the next amber day seriously.");
+        wc.appendChild(trNote);
+      }
+
+      var wcFoot=document.createElement("div");wcFoot.style.cssText="font-size:12px;color:"+C.muted+";line-height:1.5;margin:12px 2px 0;padding-top:10px;border-top:1px solid "+C.line+";";
+      wcFoot.innerHTML="<b>What to do with this:</b> the signal mix tells you what kind of week you\u2019ve had; the fatigue trend tells you which direction you\u2019re heading. Direction matters more than any single day.";
+      wc.appendChild(wcFoot);
       container.appendChild(wc);
     }
 
@@ -2340,6 +2539,8 @@
       "<b style='color:"+C.green+"'>Green (59\u2013100) \u2014 Push.</b> Recovered and ready; good day for a hard session or heavy load.<br><br>"+
       "<b style='color:"+C.amber+"'>Amber (39\u201358) \u2014 Moderate.</b> Middle ground; technical or moderate work, leave max effort for a green day.<br><br>"+
       "<b style='color:"+C.red+"'>Red (0\u201338) \u2014 Recover.</b> Signals are down; rest, mobility, or light recovery.");
+    qa("Does the score change during the day?",
+      "<b>No.</b> Your score is a morning reading. As soon as the day\u2019s real inputs are in \u2014 your 360HP CSV imported and Oura synced \u2014 the number is <b>locked permanently for that date</b> and never recalculated again, no matter how much later data arrives or how your baseline moves. Before both are in, today shows as provisional and can still move; after that it\u2019s fixed. A day that ends without a full morning read gets locked as-is at rollover, so nothing is ever left free to drift. If you need to re-take today (say the CSV was wrong), <b>Re-take today</b> on the Today tab clears just today \u2014 past days can\u2019t be touched by anything automatic.");
     qa("Why does it say \u201cconfidence\u201d?",
       "Confidence is separate from the score. It reflects how much data backed today's number \u2014 how many days of baseline you have, whether your sources agree, and how complete today's readings are. <b>Low confidence pulls the score toward the middle (50)</b> so a thin-data day never tells you to go hard before the app really knows your normal. A brand-new setup starts at low confidence until it learns your baseline (about a week).");
     qa("Is the score trend-based or just today?",
@@ -2409,10 +2610,121 @@
       "<span style='font-family:\"IBM Plex Mono\",monospace;font-weight:600;font-size:13px;color:"+C.ink+"'>"+pct+"</span></div>";
   }
 
+  // ---- Niggles UI: add, check in on, and close out anything sore ----
+  function buildNiggles(container){
+    var head=document.createElement("div");head.style.cssText="font-family:'Fraunces',serif;font-size:19px;font-weight:600;color:"+C.ink+";margin:2px 2px 2px;";
+    head.textContent="My niggles";container.appendChild(head);
+    var sub=document.createElement("div");sub.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;margin:0 2px 10px;";
+    sub.textContent="Anything sore, tight or carrying an injury. Log it once, then check in whenever it changes \u2014 the history shows whether it's settling or creeping up. Saved on this device and included in your backups.";
+    container.appendChild(sub);
+
+    var actives=activeNiggles();
+
+    // --- composer ---
+    var comp=document.createElement("div");comp.className="card";comp.style.cssText="padding:12px;margin-bottom:12px;";
+    var openBtn=document.createElement("button");openBtn.className="btn btn-primary";openBtn.style.cssText="width:100%;padding:10px;font-size:13.5px;";
+    openBtn.textContent="+ Log a new niggle";
+    var form=document.createElement("div");form.style.display="none";form.style.marginTop="10px";
+    openBtn.onclick=function(){ var o=form.style.display==="none"; form.style.display=o?"block":"none"; openBtn.textContent=o?"Cancel":"+ Log a new niggle"; };
+
+    var rowSel=document.createElement("div");rowSel.style.cssText="display:flex;gap:8px;margin-bottom:8px;";
+    var selArea=document.createElement("select");
+    selArea.style.cssText="flex:2;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px;color:"+C.ink+";font-size:14px;";
+    NIGGLE_AREAS.forEach(function(a){ var o=document.createElement("option");o.value=a;o.textContent=a;selArea.appendChild(o); });
+    var selSide=document.createElement("select");
+    selSide.style.cssText="flex:1;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px;color:"+C.ink+";font-size:14px;";
+    ["","Left","Right","Both"].forEach(function(s){ var o=document.createElement("option");o.value=s;o.textContent=s||"Side";selSide.appendChild(o); });
+    rowSel.appendChild(selArea);rowSel.appendChild(selSide);form.appendChild(rowSel);
+
+    var sevWrap=document.createElement("div");sevWrap.style.cssText="margin-bottom:8px;";
+    var sevLab=document.createElement("div");sevLab.style.cssText="font-size:12px;color:"+C.muted+";margin-bottom:4px;";
+    var sevIn=document.createElement("input");sevIn.type="range";sevIn.min="1";sevIn.max="10";sevIn.step="1";sevIn.value="3";
+    sevIn.style.cssText="width:100%;accent-color:"+C.glow+";";
+    function sevWord(v){ v=Number(v); return v<=2?"barely there":v<=4?"noticeable, not limiting":v<=6?"affecting how I move":v<=8?"limiting what I can do":"can't train through it"; }
+    function paintSev(){ sevLab.innerHTML="Severity <b>"+sevIn.value+"/10</b> \u2014 "+sevWord(sevIn.value); }
+    sevIn.addEventListener("input",paintSev);paintSev();
+    sevWrap.appendChild(sevLab);sevWrap.appendChild(sevIn);form.appendChild(sevWrap);
+
+    var ta=document.createElement("textarea");ta.placeholder="What it feels like, when it started, what makes it worse\u2026";
+    ta.style.cssText="width:100%;min-height:60px;background:"+C.panel2+";color:"+C.ink+";border:1px solid "+C.line+";border-radius:10px;padding:10px;font-size:14px;font-family:inherit;resize:vertical;";
+    form.appendChild(ta);
+    var save=document.createElement("button");save.className="btn btn-primary";save.style.cssText="margin-top:8px;width:100%;padding:10px;font-size:13.5px;";save.textContent="Save niggle";
+    save.onclick=function(){ addNiggle(selArea.value,selSide.value,sevIn.value,ta.value.trim()); render(false); };
+    form.appendChild(save);
+    comp.appendChild(openBtn);comp.appendChild(form);container.appendChild(comp);
+
+    // --- active list ---
+    if(!actives.length){
+      var none=document.createElement("div");none.className="cnote";none.style.cssText="text-align:center;color:"+C.muted+";padding:14px;";
+      none.textContent="Nothing logged \u2014 body's clear.";container.appendChild(none);
+    }
+    actives.forEach(function(n){
+      var sevCol=n.sev>=8?C.red:n.sev>=5?C.amber:C.green;
+      var cd=document.createElement("div");cd.className="card";cd.style.cssText="padding:12px 14px;margin-bottom:10px;border-left:3px solid "+sevCol+";";
+      var hist=(n.history||[]);
+      var first=hist.length?hist[0].sev:n.sev;
+      var dir=hist.length>1?(n.sev<first?"settling":n.sev>first?"getting worse":"unchanged"):"";
+      var dirCol=dir==="settling"?C.green:dir==="getting worse"?C.red:C.muted;
+      cd.innerHTML='<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">'+
+        '<div style="font-size:15px;font-weight:650;">'+esc(n.area)+(n.side?' <span style="font-size:12px;color:'+C.muted+';font-weight:400;">'+esc(n.side)+'</span>':'')+'</div>'+
+        '<div style="font-size:15px;font-weight:700;color:'+sevCol+';">'+n.sev+'/10</div></div>'+
+        '<div style="font-size:11.5px;color:'+C.muted+';margin-top:2px;">day '+(daysSince(n.started)+1)+
+        (dir?' \u00b7 <span style="color:'+dirCol+'">'+dir+'</span> (started at '+first+'/10)':'')+'</div>'+
+        (n.note?'<div style="font-size:13.5px;line-height:1.5;margin-top:7px;">'+esc(n.note)+'</div>':'');
+
+      var btns=document.createElement("div");btns.className="btnrow";btns.style.marginTop="10px";
+      var bUp=document.createElement("button");bUp.className="btn btn-ghost";bUp.style.cssText="padding:7px 12px;font-size:12.5px;";bUp.textContent="Check in";
+      bUp.onclick=function(){
+        var s=prompt("How is the "+n.area.toLowerCase()+" today? (1\u201310, "+n.sev+" last time)",String(n.sev));
+        if(s==null||s==="") return;
+        var v=Number(s); if(!isFinite(v)||v<1||v>10){ alert("Enter a number from 1 to 10."); return; }
+        var nt=prompt("Anything to add? (optional)","")||"";
+        updateNiggle(n.id,v,nt.trim()); render(false);
+      };
+      var bDone=document.createElement("button");bDone.className="btn btn-ghost";bDone.style.cssText="padding:7px 12px;font-size:12.5px;";bDone.textContent="Resolved";
+      bDone.onclick=function(){ if(confirm("Mark the "+n.area.toLowerCase()+" as resolved?")){ setNiggleStatus(n.id,"resolved"); render(false); } };
+      var bDel=document.createElement("button");bDel.className="btn btn-ghost";bDel.style.cssText="padding:7px 12px;font-size:12.5px;color:"+C.muted+";";bDel.textContent="Delete";
+      bDel.onclick=function(){ if(confirm("Delete this entry completely?")){ deleteNiggle(n.id); render(false); } };
+      btns.appendChild(bUp);btns.appendChild(bDone);btns.appendChild(bDel);cd.appendChild(btns);
+
+      if(hist.length>1){
+        var det=document.createElement("details");det.style.cssText="margin-top:8px;";
+        var sm=document.createElement("summary");sm.style.cssText="font-size:12px;color:"+C.muted+";cursor:pointer;";sm.textContent=hist.length+" check-ins";
+        var body=document.createElement("div");body.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.6;margin-top:6px;";
+        body.innerHTML=hist.slice().reverse().map(function(h){
+          return new Date(h.date+"T00:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short"})+" \u2014 <b>"+h.sev+"/10</b>"+(h.note?" \u00b7 "+esc(h.note):"");
+        }).join("<br>");
+        det.appendChild(sm);det.appendChild(body);cd.appendChild(det);
+      }
+      container.appendChild(cd);
+    });
+
+    // --- resolved, tucked away ---
+    var done=getNiggles().filter(function(x){return x.status==="resolved";});
+    if(done.length){
+      var dd=document.createElement("details");dd.style.cssText="background:"+C.panel+";border:1px solid "+C.line+";border-radius:12px;margin-bottom:14px;overflow:hidden;";
+      var ds=document.createElement("summary");ds.style.cssText="padding:12px 14px;font-size:13px;font-weight:600;cursor:pointer;color:"+C.muted+";list-style:none;";
+      ds.textContent=done.length+" resolved";
+      var db=document.createElement("div");db.style.cssText="padding:0 14px 12px;font-size:12.5px;color:"+C.muted+";line-height:1.7;";
+      db.innerHTML=done.map(function(n){
+        return esc(n.area)+(n.side?" ("+esc(n.side)+")":"")+" \u2014 "+daysSince(n.started)+" days, cleared "+
+          (n.resolvedOn?new Date(n.resolvedOn+"T00:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short"}):"");
+      }).join("<br>");
+      dd.appendChild(ds);dd.appendChild(db);container.appendChild(dd);
+    }
+
+    var div=document.createElement("div");div.style.cssText="height:1px;background:"+C.line+";margin:18px 2px 14px;";container.appendChild(div);
+    var h2=document.createElement("div");h2.style.cssText="font-family:'Fraunces',serif;font-size:19px;font-weight:600;color:"+C.ink+";margin:0 2px 8px;";
+    h2.textContent="Session notes";container.appendChild(h2);
+  }
+
   function buildPhysio(container,model){
+    // ---- YOUR NIGGLES: local-first, works with or without team sync ----
+    if(!isViewer()) buildNiggles(container);
+
     if(!teamConfigured()){
-      var w=document.createElement("div");w.className="cnote";w.style.cssText="text-align:center;color:"+C.muted+";padding:24px;line-height:1.5;";
-      w.textContent="Physio notes need team sync set up. Add your Supabase keys in config.js to enable this.";
+      var w=document.createElement("div");w.className="cnote";w.style.cssText="text-align:center;color:"+C.muted+";padding:18px;line-height:1.5;";
+      w.textContent="Shared session notes need team sync set up. Your niggles above are saved on this device either way.";
       container.appendChild(w);return;
     }
     // load notes once per tab open
@@ -2978,6 +3290,50 @@
   // A complete frozen snapshot you can save anywhere (Files, iCloud, email to yourself).
   // Tap it today → readiness-backup-2026-07-25.json; next month → a fresh dated file.
   // Keep as many as you like = versioned backups without any heavy machinery.
+  // ===== BACKDATING THE LOCKS ============================================
+  // The old build only ever stored TODAY's lock and wiped it nightly, so the true
+  // morning scores for past days were never written down anywhere — not locally, not
+  // in the team database (which gets re-upserted with recomputed values on every sync).
+  // Three ways to recover them, best first:
+  //   1. An old dated backup file — computed.days[].score is the score as it read on the
+  //      day that backup was taken. If a backup was made in the morning, that IS the
+  //      morning score.
+  //   2. A screenshot / your own note — set it by hand.
+  //   3. Nothing available — the backfill freeze keeps the current value permanently.
+  function setLockManual(iso,score,band){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return {ok:false,msg:"Date must be YYYY-MM-DD"};
+    var s=Math.round(Number(score));
+    if(!isFinite(s)||s<0||s>100) return {ok:false,msg:"Score must be 0\u2013100"};
+    var b=band||(s>=59?"green":s>=39?"yellow":"red");
+    setLock(iso,{score:s,band:b,comp:0,confidence:"manual",lockedAt:new Date().toISOString(),src:"manual"});
+    return {ok:true,msg:"Locked "+iso+" at "+s+" ("+b+")"};
+  }
+  // Pull morning scores out of a backup JSON. Only fills days that came from that
+  // backup's own snapshot date or earlier, and by default won't overwrite a lock you
+  // already trust unless it's a "backfill" (i.e. a recomputed value, not a real morning one).
+  function locksFromBackup(json,overwriteBackfill){
+    var days=(json&&json.computed&&json.computed.days)||[];
+    if(!days.length) return {ok:false,msg:"No scored days in that backup file"};
+    var snapDay=(json._created||"").slice(0,10)||isoToday();
+    var locks=getLocks(), added=0, replaced=0;
+    days.forEach(function(d){
+      if(!d||!d.day||d.score==null) return;
+      if(d.day>snapDay) return;
+      var cur=locks[d.day];
+      if(cur && !(overwriteBackfill && cur.src==="backfill")) return;
+      if(cur) replaced++; else added++;
+      locks[d.day]={score:Math.round(d.score), band:d.band||null, comp:0,
+        confidence:"restored", lockedAt:new Date().toISOString(),
+        src:"backup", from:snapDay};
+    });
+    saveLocks(locks);
+    return {ok:true,msg:"Restored "+added+" day"+(added===1?"":"s")+
+      (replaced?" and replaced "+replaced+" recomputed one"+(replaced===1?"":"s"):"")+" from the "+snapDay+" backup"};
+  }
+  // console/manual escape hatches
+  try{ window.ReadinessLocks={ view:getLocks, set:setLockManual, clear:clearLock,
+    fromBackup:locksFromBackup, retakeToday:function(){ clearLock(isoToday()); render(false); } }; }catch(e){}
+
   async function backupEverything(model){
     var statusBtn=arguments[1]||null;
     try{
@@ -2991,8 +3347,10 @@
         local:{
           rows360:getJSON(K_ROWS,null),          // your imported 360HP CSV data
           ouraCache:getJSON(K_OURA,null),          // last Oura pull
+          scoreLocks:getLocks(),                   // the permanent morning score for every day
           flags:getJSON(K_FLAGHIST,{}),            // tournament / travel per day
           notes:getJSON(K_NOTES,{}),               // your own per-day notes
+          niggles:getNiggles(),                    // body niggles / injuries + their history
           logHist:getJSON(K_LOGHIST,[]),           // sessions logged in-app (+velocities)
           gymCache:getJSON(K_GYM,null),            // cached programme
           exAlias:getJSON(K_EXALIAS,{}),           // canonical exercise names + learned aliases
@@ -3123,7 +3481,7 @@
       var rd=new FileReader();rd.onload=function(x){try{var p=parseCSV(x.target.result);
         if(!p.length||!("rMSSD" in p[0])){alert("That file doesn't look like a 360HP export \u2014 no rMSSD column found.");return;}
         setJSON(K_ROWS,p);
-        try{ var _lk=getJSON(K_SCORELOCK,{}); delete _lk[new Date().toISOString().slice(0,10)]; setJSON(K_SCORELOCK,_lk); }catch(e){} // new 360HP data = real morning reading, refresh today's locked score
+        try{ clearLock(isoToday()); }catch(e){} // new 360HP CSV = the real morning reading arriving; re-take TODAY only. Past locks are never touched.
         render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
       rd.readAsText(f);});
     app.appendChild(fileInput);
@@ -3440,6 +3798,65 @@
         var xnote=document.createElement("div");xnote.className="cnote";xnote.style.cssText="text-align:center;margin-top:6px;color:"+C.muted+";line-height:1.5;";
         xnote.innerHTML="<b>Export image</b> saves today\u2019s summary as a picture to share. <b>Export data</b> is a CSV of your scores. <b>Back up everything</b> saves one dated file with all your data \u2014 keep a few for versioned history.";
         body.appendChild(xnote);
+
+        // ---- Score locks: the permanent morning record ----
+        var lkCard=document.createElement("div");lkCard.className="card";lkCard.style.marginTop="14px";
+        var lkAll=getLocks();
+        var lkKeys=Object.keys(lkAll);
+        var nMorn=lkKeys.filter(function(k){return lkAll[k].src==="morning";}).length;
+        var nBack=lkKeys.filter(function(k){return lkAll[k].src==="backfill";}).length;
+        var nMan=lkKeys.filter(function(k){return lkAll[k].src==="manual"||lkAll[k].src==="backup";}).length;
+        var lkHead=document.createElement("div");lkHead.style.cssText="font-size:13px;font-weight:650;margin-bottom:4px;";lkHead.textContent="Score locks";
+        var lkSub=document.createElement("div");lkSub.className="ssrc";lkSub.style.cssText="color:"+C.muted+";margin-bottom:10px;line-height:1.45;";
+        lkSub.innerHTML=lkKeys.length+" day"+(lkKeys.length===1?"":"s")+" locked \u2014 "+nMorn+" from a live morning read, "+
+          nBack+" frozen from history, "+nMan+" set by hand. A locked score never changes again."+
+          (today&&today.provisional?"<br><b style='color:"+C.amber+"'>Today isn\u2019t locked yet</b> \u2014 waiting on the 360HP CSV and an Oura sync. Until both are in, today\u2019s number can still move.":"");
+        lkCard.appendChild(lkHead);lkCard.appendChild(lkSub);
+        var lkMsg=document.createElement("div");lkMsg.style.cssText="font-size:12px;color:"+C.muted+";margin-top:8px;min-height:16px;line-height:1.45;";
+        var lkRow=document.createElement("div");lkRow.className="btnrow";
+
+        var bFix=document.createElement("button");bFix.className="btn btn-ghost";bFix.style.cssText="padding:8px 14px;font-size:13px;";bFix.textContent="Set a day by hand";
+        bFix.onclick=function(){
+          var d=prompt("Which day? (YYYY-MM-DD)", (function(){var x=new Date();x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);})());
+          if(!d) return;
+          var cur=getLocks()[d.trim()];
+          var s=prompt("Score you actually saw that morning for "+d.trim()+" (0\u2013100)"+(cur?"\n\nCurrently locked at "+cur.score+" ("+(cur.src||"?")+").":""), cur?String(cur.score):"");
+          if(s==null||s==="") return;
+          var r=setLockManual(d.trim(),s);
+          lkMsg.style.color=r.ok?C.glow:C.amber; lkMsg.textContent=r.msg;
+          if(r.ok) setTimeout(function(){render(false);},600);
+        };
+        lkRow.appendChild(bFix);
+
+        var bImp=document.createElement("button");bImp.className="btn btn-ghost";bImp.style.cssText="padding:8px 14px;font-size:13px;";bImp.textContent="Recover from backup";
+        var lkFile=document.createElement("input");lkFile.type="file";lkFile.accept=".json,application/json";lkFile.style.display="none";
+        lkFile.addEventListener("change",function(ev){
+          var f=ev.target.files&&ev.target.files[0]; if(!f) return;
+          var rd=new FileReader();
+          rd.onload=function(x){
+            try{
+              var j=JSON.parse(x.target.result);
+              if(j._type!=="readiness-full-backup"){ lkMsg.style.color=C.amber; lkMsg.textContent="That isn\u2019t a readiness backup file."; return; }
+              var ow=confirm("Replace days that were only frozen from history with the scores in this backup?\n\nOK = yes, prefer the backup (closer to the real morning read)\nCancel = only fill days that have no lock at all");
+              var r=locksFromBackup(j,ow);
+              lkMsg.style.color=r.ok?C.glow:C.amber; lkMsg.textContent=r.msg;
+              if(r.ok) setTimeout(function(){render(false);},900);
+            }catch(e){ lkMsg.style.color=C.amber; lkMsg.textContent="Couldn\u2019t read that file."; }
+          };
+          rd.readAsText(f); ev.target.value="";
+        });
+        bImp.onclick=function(){ lkFile.click(); };
+        lkRow.appendChild(bImp);lkCard.appendChild(lkFile);
+
+        var bRe=document.createElement("button");bRe.className="btn btn-ghost";bRe.style.cssText="padding:8px 14px;font-size:13px;";bRe.textContent="Re-take today";
+        bRe.onclick=function(){
+          if(!confirm("Discard today\u2019s locked score and take a fresh reading from the data you have now?\n\nPast days are not affected.")) return;
+          clearLock(isoToday()); render(false);
+        };
+        lkRow.appendChild(bRe);
+
+        lkCard.appendChild(lkRow);lkCard.appendChild(lkMsg);
+        body.appendChild(lkCard);
       }
 
       // ---- Team sync ----
