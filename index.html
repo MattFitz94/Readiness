@@ -186,7 +186,15 @@
   //        "eod"      = day ended without a complete morning read; locked as-is so it stops drifting
   //        "backfill" = pre-existing history, frozen at whatever it read when v15 first ran
   //        "manual"   = you set it by hand (e.g. from a screenshot)
-  function isoToday(){ return new Date().toISOString().slice(0,10); }
+  // --- LOCAL-DATE HELPERS (timezone fix) -------------------------------------
+  // new Date("2026-07-25") parses as MIDNIGHT UTC, but toLocaleDateString renders
+  // in the device timezone. West of Greenwich that prints the PREVIOUS day.
+  // Always parse a YYYY-MM-DD with dLocal(), and always stamp one with isoLocal().
+  function dLocal(iso){ return new Date(String(iso).slice(0,10)+"T00:00:00"); }
+  function isoLocal(d){ var y=d.getFullYear(),m=d.getMonth()+1,a=d.getDate();
+    return y+"-"+(m<10?"0":"")+m+"-"+(a<10?"0":"")+a; }
+  function isoShift(iso,n){ var d=dLocal(iso); d.setDate(d.getDate()+n); return isoLocal(d); }
+  function isoToday(){ return isoLocal(new Date()); }
   // PERF: the lock store is read once per session and kept in memory. Previously every
   // day in the model re-parsed the whole store from localStorage on every render (and a
   // first-run backfill wrote it back once per day of history), which is a JSON parse and
@@ -1205,7 +1213,7 @@
       o_sleep_hours: (row.o_sleephrs!=null?row.o_sleephrs:null),
       o_sleep_midpoint: null,               // not captured yet; regularity term stays dormant
       o_temp_dev: (row.o_tempdev!=null?row.o_tempdev:null),
-      travel: (getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"none",
+      travel: (getFlags(isoShift(row.iso,-1)).travel)||"none",
       noteTags: (function(){ var t=((row.tags||"")+" "+(getNote(row.iso)||row.note||"")).toLowerCase(); return t.trim()?[t]:[]; })()
     };
   }
@@ -1387,7 +1395,7 @@
         locked:_locked, provisional:_provisional,
         reasons:reasons, confidence:(res.confidence?res.confidence.level:"low"),
         v2:res, has:(hrv!=null||row.hp_hrv!=null||row.o_hrv!=null||row.hp_subjective!=null),
-        travel:(getFlags((function(){var d=new Date(row.iso+"T00:00:00");d.setDate(d.getDate()-1);return d.toISOString().slice(0,10);})()).travel)||"",
+        travel:(getFlags(isoShift(row.iso,-1)).travel)||"",
         tourn:!!getFlags(row.iso).tourn, appNote:getNote(row.iso)});
     });
   }
@@ -1546,7 +1554,7 @@
     if(!chartsReady()){noChart(container);return;}
     Chart.defaults.font.family="Inter, system-ui, sans-serif"; Chart.defaults.color=C.muted;
     var rowsB=model.filter(function(d){return d.has;});
-    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    var labels=rowsB.map(function(d){return fmt(dLocal(d.iso));});
     if(rowsB.length<2){needSync(container,"Import your 360HP CSV (and sync Oura) to see trends here.");return;}
 
     // ---- 360HP-ONLY series (these Trends charts ignore Oura; gaps where no 360HP) ----
@@ -1618,7 +1626,7 @@
       needSync(container,"This tab compares your 360HP HRV against Oura's raw HRV side by side. It needs the updated Oura relay (v2) deployed so Oura's raw HRV comes through \u2014 once that's live and synced, these charts fill in.");
       return;
     }
-    var lbl=both.map(function(d){return fmt(new Date(d.iso));});
+    var lbl=both.map(function(d){return fmt(dLocal(d.iso));});
     lineChart(container,"360HP vs Oura HRV","Both raw HRV (ms) on the same days. Close lines = your sources agree; gaps = they diverge.",lbl,[
       {label:"360HP",data:both.map(function(d){return r1(d.hp_hrv);}),borderColor:C.hrv,borderWidth:2.4,pointRadius:2,tension:0.3},
       {label:"Oura",data:both.map(function(d){return r1(d.o_hrv);}),borderColor:C.oura,borderWidth:2.4,pointRadius:2,tension:0.3}
@@ -1657,7 +1665,7 @@
     destroyCharts();
     if(!chartsReady()){noChart(container);return;}
     var rowsB=model.filter(function(d){return d.has;});
-    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    var labels=rowsB.map(function(d){return fmt(dLocal(d.iso));});
     function roll(arr,w){return arr.map(function(_,i){var v=[];for(var k=Math.max(0,i-w+1);k<=i;k++){if(arr[k]!=null)v.push(arr[k]);}return v.length?r1(mean(v)):null;});}
 
     var withHrs=rowsB.filter(function(d){return d.o_sleephrs!=null;}).length;
@@ -1791,7 +1799,7 @@
     destroyCharts();
     if(!chartsReady()){noChart(container);return;}
     var rowsB=model.filter(function(d){return d.has;});
-    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    var labels=rowsB.map(function(d){return fmt(dLocal(d.iso));});
     var withO=rowsB.filter(function(d){return d.o_readiness!=null||d.o_sleepscore!=null;});
     if(withO.length<2){
       needSync(container,"No Oura data yet. Tap \u201cSync Oura\u201d at the top \u2014 once it pulls, readiness, sleep, resting HR and body temperature appear here.");
@@ -1867,7 +1875,7 @@
     if(!chartsReady()){noChart(container);return;}
     Chart.defaults.font.family="Inter, system-ui, sans-serif"; Chart.defaults.color=C.muted;
     var rowsB=model.filter(function(d){return d.has;});
-    var labels=rowsB.map(function(d){return fmt(new Date(d.iso));});
+    var labels=rowsB.map(function(d){return fmt(dLocal(d.iso));});
     if(rowsB.length<2){needSync(container,"Import your 360HP CSV to see your measures here.");return;}
 
     // ---- B3: Raw HRV (rMSSD) + baseline ----
@@ -2158,7 +2166,7 @@
       if(series.length>=2){
         var cd2=card("Bar speed trend \u2014 "+topEx,"Average bar velocity (m/s) over time for your most-logged lift. A drop in speed at similar loads is an early fatigue signal, often before HRV moves.");
         var cv2=mkCanvas(cd2,220);container.appendChild(cd2);
-        var lbl2=series.map(function(l){return fmt(new Date(l.date));});
+        var lbl2=series.map(function(l){return fmt(dLocal(l.date));});
         CHARTS.push(new Chart(cv2,{type:"line",data:{labels:lbl2,datasets:[
           {label:"avg velocity",data:series.map(function(l){return r1(l.avgVel);}),borderColor:C.glow,borderWidth:2.6,pointRadius:3,tension:0.3},
           {label:"top weight",data:series.map(function(l){return l.topWeight;}),borderColor:C.muted,borderWidth:1,borderDash:[4,3],pointRadius:0,tension:0.3,yAxisID:"y1"}
@@ -2182,7 +2190,7 @@
     list.forEach(function(d){
       var bc=C[d.band];
       var row=document.createElement("div");row.className="histrow";row.style.borderColor=bc+"44";
-      var dateStr=new Date(d.iso).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"});
+      var dateStr=dLocal(d.iso).toLocaleDateString("en-GB",{weekday:"short",day:"2-digit",month:"short"});
       var meta=[];
       if(d.hrv!=null) meta.push("HRV "+d.hrv.toFixed(0)+(d.hrvSrc?" ("+d.hrvSrc+")":""));
       if(d.hp_subjective!=null) meta.push("subj "+d.hp_subjective);
@@ -2821,7 +2829,7 @@
     [["Today",0],["Yesterday",1],["3 days ago",3],["A week ago",7]].forEach(function(q){
       var b=document.createElement("button");b.className="btn btn-ghost";b.style.cssText="padding:5px 9px;font-size:11.5px;";
       b.textContent=q[0];
-      b.onclick=function(){ var d=new Date(); d.setDate(d.getDate()-q[1]); dIn.value=d.toISOString().slice(0,10); };
+      b.onclick=function(){ dIn.value=isoShift(isoToday(),-q[1]); };
       quick.appendChild(b);
     });
     whenWrap.appendChild(quick);card.appendChild(whenWrap);
@@ -3368,7 +3376,7 @@
           gymStatus={state:"ok",msg:""};
           // cache logged session locally so load & velocity trends can be charted
           var hist=getJSON(K_LOGHIST,[]);
-          var logDate=day.date||new Date().toISOString().slice(0,10);
+          var logDate=day.date||isoToday();
           rows.forEach(function(r){
             // volume = sum of (weight values entered); a simple load proxy per exercise
             var weights=[r.v1,r.v2,r.v3,r.v4].map(function(x){return parseFloat(x)||0;});
@@ -3535,7 +3543,7 @@
 
       // Sheet 1: one row per day — the composite score + flags + the inputs behind it
       var lines=[];
-      lines.push("READINESS EXPORT," + new Date().toISOString().slice(0,10));
+      lines.push("READINESS EXPORT," + isoToday());
       lines.push("");
       lines.push("DAILY SCORES AND FLAGS");
       lines.push(["date","readiness_score_0_100","band","confidence","tournament_day","travel",
@@ -3581,7 +3589,7 @@
       });
 
       var csv=lines.join("\n");
-      var stamp=new Date().toISOString().slice(0,10);
+      var stamp=isoToday();
       var name="readiness-export-"+stamp+".csv";
 
       // try a real file download first
@@ -3761,7 +3769,7 @@
     var statusBtn=arguments[1]||null;
     try{
       if(statusBtn) statusBtn.textContent="Backing up\u2026";
-      var stamp=new Date().toISOString().slice(0,10);
+      var stamp=isoToday();
       var snap={
         _type:"readiness-full-backup",
         _version:1,
@@ -4122,7 +4130,7 @@
       // Editing these is owner-only; viewers see the flags reflected but can't change them.
       var todayIso=today.iso;
       if(canEditOwn()){
-      var yestIso=(function(){ var d=new Date(todayIso+"T00:00:00"); d.setDate(d.getDate()-1); return d.toISOString().slice(0,10); })();
+      var yestIso=isoShift(todayIso,-1);
       var tog=document.createElement("div");tog.className="btnrow";
       var tb=document.createElement("button");tb.className="btn "+(tournOn?"btn-primary":"btn-ghost");
       tb.textContent=(tournOn?"\ud83c\udfcc\ufe0f Tournament day: ON":"Tournament day");
@@ -4278,7 +4286,7 @@
 
         var bFix=document.createElement("button");bFix.className="btn btn-ghost";bFix.style.cssText="padding:8px 14px;font-size:13px;";bFix.textContent="Set a day by hand";
         bFix.onclick=function(){
-          var d=prompt("Which day? (YYYY-MM-DD)", (function(){var x=new Date();x.setDate(x.getDate()-1);return x.toISOString().slice(0,10);})());
+          var d=prompt("Which day? (YYYY-MM-DD)", isoShift(isoToday(),-1));
           if(!d) return;
           var cur=getLocks()[d.trim()];
           var s=prompt("Score you actually saw that morning for "+d.trim()+" (0\u2013100)"+(cur?"\n\nCurrently locked at "+cur.score+" ("+(cur.src||"?")+").":""), cur?String(cur.score):"");
