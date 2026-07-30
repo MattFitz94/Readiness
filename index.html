@@ -162,11 +162,11 @@
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
   var GYM_URL="https://script.google.com/macros/s/AKfycbyIgdhH7JNT5N915Lj1UTbetvNieTz6JdcXV8vDygxwCY4hr5txxN7YDrxynEnzl-xp/exec";
 
-  var APP_VERSION="v15.0";
-  var APP_VERSION_NAME="locked scores + physio";
+  var APP_VERSION="v15.1";
+  var APP_VERSION_NAME="locked scores + body log";
   var APP_VERSION_DATE="30 Jul 2026";
   var APP_CHANGELOG=[
-    ["v15.0","30 Jul 2026","Scores lock permanently per date and never drift. Physio tab with your own niggle tracker. Full backup restore. Stale-data warnings. Sleep score and sleep stages get rolling averages; restlessness reads the right way round. Chart pop-ups can be dismissed."],
+    ["v15.1","30 Jul 2026","Scores lock permanently per date and never drift. Physio tab with your own body log — niggles, soreness, injury, illness, headaches, backdatable. Full backup restore. Stale-data warnings. Sleep score and sleep stages get rolling averages; restlessness reads the right way round. Chart pop-ups can be dismissed."],
     ["v14","earlier","Sleep tab: duration, stages, efficiency, restlessness, sleep \u2192 next-day HRV."],
     ["v13","earlier","Training + gym trends, velocity tracking, team sync."]
   ];
@@ -299,42 +299,124 @@
   var K_EXDISMISS="readiness_ex_dismiss_v1"; // names the user chose to keep as their own new exercise
   var K_FLAGHIST="readiness_flaghist_v1"; // per-date record of tournament/travel flags
   var K_NOTES="readiness_notes_v1";       // per-date free-text notes
-  var K_NIGGLES="readiness_niggles_v1";   // your own body niggles / injuries, tracked over time
+  var K_NIGGLES="readiness_niggles_v1";   // body log: niggles, soreness, injury, illness, headaches
 
-  // ===== NIGGLES =========================================================
-  // Your private running record of anything sore. Stored on this device (so it works with
-  // or without team sync) and included in "Back up everything". Each entry keeps a history
-  // of severity check-ins, so you can see whether something is settling or creeping.
-  var NIGGLE_AREAS=["Lower back","Upper back","Neck","Shoulder","Elbow","Wrist / hand",
+  // ===== BODY LOG ========================================================
+  // Your private running record of anything the body is doing that training should know
+  // about: niggles, soreness, injuries, illness, headaches, fatigue. Kept on this device
+  // and included in "Back up everything". Every entry keeps a dated history of check-ins,
+  // so you can see whether something is settling or creeping.
+  //
+  // Entry: { id, type, area, side, sev, note, started, at, status, resolvedOn,
+  //          history:[{ id, date, time, at, sev, note }] }
+  //   started = the date the thing actually began (backdatable)
+  //   at      = ISO timestamp of when it was typed in (editable)
+  var BODY_TYPES=[
+    {k:"niggle",   label:"Niggle",    area:true,  hint:"Something grumbling that isn\u2019t stopping you"},
+    {k:"soreness", label:"Soreness",  area:true,  hint:"Normal training soreness \u2014 DOMS, tightness"},
+    {k:"injury",   label:"Injury",    area:true,  hint:"A real injury that changes what you can do"},
+    {k:"illness",  label:"Illness",   area:false, hint:"Cold, virus, stomach, temperature"},
+    {k:"headache", label:"Headache",  area:false, hint:"Head or migraine"},
+    {k:"fatigue",  label:"Fatigue",   area:false, hint:"Flat, heavy, unusually tired"},
+    {k:"other",    label:"Other",     area:true,  hint:"Anything else worth recording"}
+  ];
+  function bodyType(k){ for(var i=0;i<BODY_TYPES.length;i++){ if(BODY_TYPES[i].k===k) return BODY_TYPES[i]; } return BODY_TYPES[0]; }
+  var BODY_AREAS=["Lower back","Upper back","Neck","Shoulder","Elbow","Wrist / hand",
     "Hip","Glute","Hamstring","Quad","Groin","Knee","Calf","Achilles","Ankle / foot","Ribs","Other"];
-  function getNiggles(){ var n=getJSON(K_NIGGLES,[]); return Array.isArray(n)?n:[]; }
-  function saveNiggles(n){ setJSON(K_NIGGLES,n); }
-  function addNiggle(area,side,sev,note){
-    var n=getNiggles();
-    var today=isoToday();
-    n.unshift({ id:"ng_"+Date.now(), area:area, side:side||"", started:today, status:"active",
-      sev:Number(sev), note:note||"", history:[{date:today,sev:Number(sev),note:note||""}] });
-    saveNiggles(n); return n;
+
+  function nowIso(){ return new Date().toISOString(); }
+  function nowTime(){ var d=new Date(); return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
+  function fmtDay(iso){ try{ return new Date(iso+"T00:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short"}); }catch(e){ return iso||""; } }
+  function fmtDayFull(iso){ try{ return new Date(iso+"T00:00:00").toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"}); }catch(e){ return iso||""; } }
+
+  function getBodyLog(){
+    var n=getJSON(K_NIGGLES,[]);
+    if(!Array.isArray(n)) return [];
+    // migrate v1 entries (area-only niggles, no type or timestamp)
+    var changed=false;
+    n.forEach(function(e){
+      if(!e.type){ e.type="niggle"; changed=true; }
+      if(!e.at){ e.at=(e.started||isoToday())+"T09:00:00.000Z"; changed=true; }
+      (e.history||[]).forEach(function(h){
+        if(!h.id){ h.id="h_"+Math.random().toString(36).slice(2,9); changed=true; }
+        if(!h.at){ h.at=(h.date||e.started||isoToday())+"T09:00:00.000Z"; changed=true; }
+      });
+    });
+    if(changed){ try{ setJSON(K_NIGGLES,n); }catch(e){} }
+    return n;
   }
-  function updateNiggle(id,sev,note){
-    var n=getNiggles();
+  function saveBodyLog(n){ setJSON(K_NIGGLES,n); }
+  function getNiggles(){ return getBodyLog(); }          // kept for the backup snapshot
+
+  function addBodyEntry(o){
+    var n=getBodyLog();
+    var started=o.started||isoToday();
+    var at=o.at||nowIso();
+    n.unshift({ id:"bl_"+Date.now(), type:o.type||"niggle", area:o.area||"", side:o.side||"",
+      sev:Number(o.sev), note:o.note||"", started:started, at:at, status:"active", resolvedOn:null,
+      history:[{ id:"h_"+Date.now(), date:started, time:(o.time||nowTime()), at:at, sev:Number(o.sev), note:o.note||"" }] });
+    saveBodyLog(n); return n;
+  }
+  function findEntry(id){ var n=getBodyLog(); for(var i=0;i<n.length;i++){ if(n[i].id===id) return n[i]; } return null; }
+  function editBodyEntry(id,patch){
+    var n=getBodyLog();
     for(var i=0;i<n.length;i++){ if(n[i].id===id){
-      n[i].sev=Number(sev);
-      n[i].history=(n[i].history||[]).concat([{date:isoToday(),sev:Number(sev),note:note||""}]);
-      if(note) n[i].note=note;
+      ["type","area","side","note","started","at"].forEach(function(k){ if(patch[k]!==undefined) n[i][k]=patch[k]; });
+      if(patch.sev!==undefined){ n[i].sev=Number(patch.sev);
+        // keep the first check-in in step with the entry, so the trend reads correctly
+        if(n[i].history&&n[i].history.length===1) n[i].history[0].sev=Number(patch.sev);
+      }
+      if(patch.started!==undefined && n[i].history && n[i].history.length) n[i].history[0].date=patch.started;
       break; } }
-    saveNiggles(n); return n;
+    saveBodyLog(n); return n;
   }
-  function setNiggleStatus(id,status){
-    var n=getNiggles();
+  function addCheckIn(id,o){
+    var n=getBodyLog();
+    for(var i=0;i<n.length;i++){ if(n[i].id===id){
+      var h=(n[i].history||[]).concat([{ id:"h_"+Date.now(), date:o.date||isoToday(), time:o.time||nowTime(),
+        at:nowIso(), sev:Number(o.sev), note:o.note||"" }]);
+      h.sort(function(a,b){ return (a.date+(a.time||""))<(b.date+(b.time||""))?-1:1; });
+      n[i].history=h;
+      n[i].sev=Number(h[h.length-1].sev);   // current severity = most recent check-in by date
+      break; } }
+    saveBodyLog(n); return n;
+  }
+  function editCheckIn(id,hid,patch){
+    var n=getBodyLog();
+    for(var i=0;i<n.length;i++){ if(n[i].id===id){
+      (n[i].history||[]).forEach(function(h){ if(h.id===hid){
+        if(patch.sev!==undefined) h.sev=Number(patch.sev);
+        if(patch.date!==undefined) h.date=patch.date;
+        if(patch.time!==undefined) h.time=patch.time;
+        if(patch.note!==undefined) h.note=patch.note;
+      }});
+      n[i].history.sort(function(a,b){ return (a.date+(a.time||""))<(b.date+(b.time||""))?-1:1; });
+      if(n[i].history.length) n[i].sev=Number(n[i].history[n[i].history.length-1].sev);
+      break; } }
+    saveBodyLog(n); return n;
+  }
+  function deleteCheckIn(id,hid){
+    var n=getBodyLog();
+    for(var i=0;i<n.length;i++){ if(n[i].id===id){
+      if((n[i].history||[]).length<=1) return n;    // never leave an entry with no history
+      n[i].history=n[i].history.filter(function(h){ return h.id!==hid; });
+      n[i].sev=Number(n[i].history[n[i].history.length-1].sev);
+      break; } }
+    saveBodyLog(n); return n;
+  }
+  function setBodyStatus(id,status,onDate){
+    var n=getBodyLog();
     for(var i=0;i<n.length;i++){ if(n[i].id===id){ n[i].status=status;
-      n[i].resolvedOn=(status==="resolved")?isoToday():null; break; } }
-    saveNiggles(n); return n;
+      n[i].resolvedOn=(status==="resolved")?(onDate||isoToday()):null; break; } }
+    saveBodyLog(n); return n;
   }
-  function deleteNiggle(id){ saveNiggles(getNiggles().filter(function(x){return x.id!==id;})); }
-  function activeNiggles(){ return getNiggles().filter(function(x){return x.status!=="resolved";}); }
+  function deleteBodyEntry(id){ saveBodyLog(getBodyLog().filter(function(x){return x.id!==id;})); }
+  function activeBodyEntries(){ return getBodyLog().filter(function(x){return x.status!=="resolved";}); }
   function daysSince(iso){
     try{ return Math.max(0,Math.round((Date.now()-new Date(iso+"T00:00:00").getTime())/86400000)); }catch(e){ return 0; }
+  }
+  function daysBetween(a,b){
+    try{ return Math.max(0,Math.round((new Date(b+"T00:00:00")-new Date(a+"T00:00:00"))/86400000)); }catch(e){ return 0; }
   }
   // per-day flags: {tourn:bool, travel:""|"short"|"long"}
   function getFlags(iso){ var fh=getJSON(K_FLAGHIST,{}); return fh[iso]||{}; }
@@ -2663,105 +2745,303 @@
   }
 
   // ---- Niggles UI: add, check in on, and close out anything sore ----
-  function buildNiggles(container){
+  // ---- Body log UI: add, edit, check in on, and close out anything the body is doing ----
+  var BL_FORM=null;      // null | "new" | entry id being edited
+  var BL_CHECKIN=null;   // entry id currently being checked in on
+  var BL_HIST=null;      // check-in id being edited
+  var BL_SHOWDONE=false;
+
+  function blField(label){
+    var w=document.createElement("div");w.style.cssText="margin-bottom:9px;";
+    var l=document.createElement("div");l.style.cssText="font-size:11.5px;color:"+C.muted+";margin-bottom:4px;";
+    l.textContent=label;w.appendChild(l);return w;
+  }
+  var BL_INPUT="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:9px 10px;color:"+C.ink+";font-size:14px;font-family:inherit;";
+
+  function blSeverityRow(val,type){
+    var wrap=document.createElement("div");wrap.style.cssText="margin-bottom:9px;";
+    var lab=document.createElement("div");lab.style.cssText="font-size:11.5px;color:"+C.muted+";margin-bottom:4px;";
+    var inp=document.createElement("input");inp.type="range";inp.min="1";inp.max="10";inp.step="1";inp.value=String(val||3);
+    inp.style.cssText="width:100%;accent-color:"+C.glow+";";
+    function word(v){ v=Number(v);
+      if(type==="illness") return v<=2?"barely noticeable":v<=4?"under the weather":v<=6?"properly ill":v<=8?"knocked out":"can\u2019t function";
+      if(type==="fatigue") return v<=2?"slightly flat":v<=4?"noticeably tired":v<=6?"heavy legs, hard work":v<=8?"running on empty":"completely done";
+      if(type==="headache") return v<=2?"faint":v<=4?"nagging":v<=6?"distracting":v<=8?"hard to think through":"debilitating";
+      return v<=2?"barely there":v<=4?"noticeable, not limiting":v<=6?"affecting how I move":v<=8?"limiting what I can do":"can\u2019t train through it";
+    }
+    function paint(){ lab.innerHTML="Severity <b>"+inp.value+"/10</b> \u2014 "+word(inp.value); }
+    inp.addEventListener("input",paint);paint();
+    wrap.appendChild(lab);wrap.appendChild(inp);
+    wrap.getValue=function(){ return inp.value; };
+    wrap.repaint=function(t){ type=t; paint(); };
+    return wrap;
+  }
+
+  // The add / edit form. entry===null means a new entry.
+  function blForm(container,entry){
+    var isNew=!entry;
+    var st={ type:(entry?entry.type:"niggle"), area:(entry?entry.area:"Lower back"), side:(entry?entry.side:"") };
+    var card=document.createElement("div");card.className="card";card.style.cssText="padding:13px 14px;margin-bottom:12px;border:1px solid "+C.glow2+"55;";
+    var h=document.createElement("div");h.style.cssText="font-size:13px;font-weight:650;margin-bottom:10px;";
+    h.textContent=isNew?"New entry":"Edit entry";card.appendChild(h);
+
+    // type chips
+    var tf=blField("What is it?");
+    var chips=document.createElement("div");chips.style.cssText="display:flex;flex-wrap:wrap;gap:6px;";
+    var hintEl=document.createElement("div");hintEl.style.cssText="font-size:11.5px;color:"+C.muted+";margin-top:6px;line-height:1.4;";
+    var sevRow;
+    BODY_TYPES.forEach(function(t){
+      var b=document.createElement("button");b.className="btn btn-ghost";
+      b.style.cssText="padding:7px 11px;font-size:12.5px;"+(st.type===t.k?("background:"+C.glow+"22;border-color:"+C.glow2+";color:"+C.ink+";"):"");
+      b.textContent=t.label;
+      b.onclick=function(){ st.type=t.k; BL_TYPE_REPAINT(); };
+      chips.appendChild(b);
+    });
+    tf.appendChild(chips);tf.appendChild(hintEl);card.appendChild(tf);
+
+    // area + side (physical types only)
+    var areaWrap=blField("Where?");
+    var areaRow=document.createElement("div");areaRow.style.cssText="display:flex;gap:8px;";
+    var selArea=document.createElement("select");selArea.style.cssText="flex:2;"+BL_INPUT;
+    BODY_AREAS.forEach(function(a){ var o=document.createElement("option");o.value=a;o.textContent=a;if(st.area===a)o.selected=true;selArea.appendChild(o); });
+    var selSide=document.createElement("select");selSide.style.cssText="flex:1;"+BL_INPUT;
+    ["","Left","Right","Both"].forEach(function(s){ var o=document.createElement("option");o.value=s;o.textContent=s||"Side";if(st.side===s)o.selected=true;selSide.appendChild(o); });
+    areaRow.appendChild(selArea);areaRow.appendChild(selSide);areaWrap.appendChild(areaRow);card.appendChild(areaWrap);
+
+    // when it started — backdatable
+    var whenWrap=blField("When did it start?");
+    var whenRow=document.createElement("div");whenRow.style.cssText="display:flex;gap:8px;";
+    var dIn=document.createElement("input");dIn.type="date";dIn.style.cssText="flex:2;"+BL_INPUT;
+    dIn.max=isoToday();
+    dIn.value=entry?entry.started:isoToday();
+    var tIn=document.createElement("input");tIn.type="time";tIn.style.cssText="flex:1;"+BL_INPUT;
+    tIn.value=(entry&&entry.history&&entry.history[0]&&entry.history[0].time)?entry.history[0].time:nowTime();
+    whenRow.appendChild(dIn);whenRow.appendChild(tIn);whenWrap.appendChild(whenRow);
+    var quick=document.createElement("div");quick.style.cssText="display:flex;gap:6px;margin-top:6px;";
+    [["Today",0],["Yesterday",1],["3 days ago",3],["A week ago",7]].forEach(function(q){
+      var b=document.createElement("button");b.className="btn btn-ghost";b.style.cssText="padding:5px 9px;font-size:11.5px;";
+      b.textContent=q[0];
+      b.onclick=function(){ var d=new Date(); d.setDate(d.getDate()-q[1]); dIn.value=d.toISOString().slice(0,10); };
+      quick.appendChild(b);
+    });
+    whenWrap.appendChild(quick);card.appendChild(whenWrap);
+
+    sevRow=blSeverityRow(entry?entry.sev:3,st.type);card.appendChild(sevRow);
+
+    var nf=blField("Notes");
+    var ta=document.createElement("textarea");ta.placeholder="What it feels like, what brought it on, what makes it worse\u2026";
+    ta.style.cssText="width:100%;min-height:58px;resize:vertical;"+BL_INPUT;
+    ta.value=entry?(entry.note||""):"";
+    nf.appendChild(ta);card.appendChild(nf);
+
+    // logged-at timestamp, editable
+    var stampWrap=blField("Logged at");
+    var stampRow=document.createElement("div");stampRow.style.cssText="display:flex;gap:8px;";
+    var sD=document.createElement("input");sD.type="date";sD.style.cssText="flex:2;"+BL_INPUT;
+    var sT=document.createElement("input");sT.type="time";sT.style.cssText="flex:1;"+BL_INPUT;
+    var at=entry?new Date(entry.at||nowIso()):new Date();
+    sD.value=at.toISOString().slice(0,10);
+    sT.value=String(at.getHours()).padStart(2,"0")+":"+String(at.getMinutes()).padStart(2,"0");
+    stampRow.appendChild(sD);stampRow.appendChild(sT);stampWrap.appendChild(stampRow);
+    var stampNote=document.createElement("div");stampNote.style.cssText="font-size:11px;color:"+C.muted+";margin-top:4px;line-height:1.4;";
+    stampNote.textContent="Set automatically when you type it in. Change it if you\u2019re writing something up after the fact.";
+    stampWrap.appendChild(stampNote);card.appendChild(stampWrap);
+
+    function BL_TYPE_REPAINT(){
+      Array.prototype.forEach.call(chips.children,function(b,i){
+        var on=(BODY_TYPES[i].k===st.type);
+        b.style.cssText="padding:7px 11px;font-size:12.5px;"+(on?("background:"+C.glow+"22;border-color:"+C.glow2+";color:"+C.ink+";"):"");
+      });
+      var t=bodyType(st.type);
+      hintEl.textContent=t.hint;
+      areaWrap.style.display=t.area?"block":"none";
+      sevRow.repaint(st.type);
+    }
+    BL_TYPE_REPAINT();
+
+    var msg=document.createElement("div");msg.style.cssText="font-size:12px;color:"+C.amber+";min-height:15px;margin-top:2px;";
+    var btns=document.createElement("div");btns.className="btnrow";btns.style.marginTop="8px";
+    var save=document.createElement("button");save.className="btn btn-primary";save.style.cssText="flex:1;padding:10px;font-size:13.5px;";
+    save.textContent=isNew?"Save entry":"Save changes";
+    save.onclick=function(){
+      if(!dIn.value){ msg.textContent="Pick a start date."; return; }
+      if(dIn.value>isoToday()){ msg.textContent="That date is in the future."; return; }
+      var stamp=new Date(sD.value+"T"+(sT.value||"09:00")+":00").toISOString();
+      var payload={ type:st.type, area:bodyType(st.type).area?selArea.value:"", side:bodyType(st.type).area?selSide.value:"",
+        sev:sevRow.getValue(), note:ta.value.trim(), started:dIn.value, time:tIn.value, at:stamp };
+      if(isNew) addBodyEntry(payload); else editBodyEntry(entry.id,payload);
+      BL_FORM=null; render(false);
+    };
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="padding:10px 14px;font-size:13.5px;";
+    cancel.textContent="Cancel";cancel.onclick=function(){ BL_FORM=null; render(false); };
+    btns.appendChild(save);btns.appendChild(cancel);
+    card.appendChild(btns);card.appendChild(msg);
+    container.appendChild(card);
+  }
+
+  // A check-in: today's reading on an existing entry, backdatable.
+  function blCheckInForm(container,entry){
+    var card=document.createElement("div");card.className="card";card.style.cssText="padding:12px 14px;margin:8px 0 0;border:1px solid "+C.glow2+"55;";
+    var h=document.createElement("div");h.style.cssText="font-size:13px;font-weight:650;margin-bottom:8px;";
+    h.textContent="Check in \u2014 "+(entry.area||bodyType(entry.type).label);card.appendChild(h);
+    var sub=document.createElement("div");sub.style.cssText="font-size:11.5px;color:"+C.muted+";margin-bottom:9px;";
+    sub.textContent="Last logged "+entry.sev+"/10.";card.appendChild(sub);
+
+    var whenWrap=blField("When");
+    var whenRow=document.createElement("div");whenRow.style.cssText="display:flex;gap:8px;";
+    var dIn=document.createElement("input");dIn.type="date";dIn.style.cssText="flex:2;"+BL_INPUT;dIn.max=isoToday();dIn.value=isoToday();
+    var tIn=document.createElement("input");tIn.type="time";tIn.style.cssText="flex:1;"+BL_INPUT;tIn.value=nowTime();
+    whenRow.appendChild(dIn);whenRow.appendChild(tIn);whenWrap.appendChild(whenRow);card.appendChild(whenWrap);
+
+    var sevRow=blSeverityRow(entry.sev,entry.type);card.appendChild(sevRow);
+    var ta=document.createElement("textarea");ta.placeholder="Anything to add? (optional)";
+    ta.style.cssText="width:100%;min-height:46px;resize:vertical;"+BL_INPUT;card.appendChild(ta);
+
+    var btns=document.createElement("div");btns.className="btnrow";btns.style.marginTop="8px";
+    var save=document.createElement("button");save.className="btn btn-primary";save.style.cssText="flex:1;padding:9px;font-size:13px;";save.textContent="Log it";
+    save.onclick=function(){ addCheckIn(entry.id,{date:dIn.value,time:tIn.value,sev:sevRow.getValue(),note:ta.value.trim()}); BL_CHECKIN=null; render(false); };
+    var cancel=document.createElement("button");cancel.className="btn btn-ghost";cancel.style.cssText="padding:9px 13px;font-size:13px;";
+    cancel.textContent="Cancel";cancel.onclick=function(){ BL_CHECKIN=null; render(false); };
+    btns.appendChild(save);btns.appendChild(cancel);card.appendChild(btns);
+    container.appendChild(card);
+  }
+
+  function blHistEditor(container,entry,h){
+    var box=document.createElement("div");box.style.cssText="margin-top:7px;padding:10px;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;";
+    var row=document.createElement("div");row.style.cssText="display:flex;gap:6px;margin-bottom:8px;";
+    var dIn=document.createElement("input");dIn.type="date";dIn.style.cssText="flex:2;"+BL_INPUT;dIn.max=isoToday();dIn.value=h.date;
+    var tIn=document.createElement("input");tIn.type="time";tIn.style.cssText="flex:1;"+BL_INPUT;tIn.value=h.time||"09:00";
+    row.appendChild(dIn);row.appendChild(tIn);box.appendChild(row);
+    var sevRow=blSeverityRow(h.sev,entry.type);box.appendChild(sevRow);
+    var ta=document.createElement("textarea");ta.style.cssText="width:100%;min-height:40px;resize:vertical;"+BL_INPUT;ta.value=h.note||"";
+    box.appendChild(ta);
+    var btns=document.createElement("div");btns.className="btnrow";btns.style.marginTop="7px";
+    var sv=document.createElement("button");sv.className="btn btn-primary";sv.style.cssText="padding:7px 12px;font-size:12.5px;";sv.textContent="Save";
+    sv.onclick=function(){ editCheckIn(entry.id,h.id,{date:dIn.value,time:tIn.value,sev:sevRow.getValue(),note:ta.value.trim()}); BL_HIST=null; render(false); };
+    var cx=document.createElement("button");cx.className="btn btn-ghost";cx.style.cssText="padding:7px 12px;font-size:12.5px;";cx.textContent="Cancel";
+    cx.onclick=function(){ BL_HIST=null; render(false); };
+    btns.appendChild(sv);btns.appendChild(cx);
+    if((entry.history||[]).length>1){
+      var dl=document.createElement("button");dl.className="btn btn-ghost";dl.style.cssText="padding:7px 12px;font-size:12.5px;color:"+C.muted+";";dl.textContent="Delete";
+      dl.onclick=function(){ if(confirm("Delete this check-in?")){ deleteCheckIn(entry.id,h.id); BL_HIST=null; render(false); } };
+      btns.appendChild(dl);
+    }
+    box.appendChild(btns);container.appendChild(box);
+  }
+
+  function buildNiggles(container,model){
     var head=document.createElement("div");head.style.cssText="font-family:'Fraunces',serif;font-size:19px;font-weight:600;color:"+C.ink+";margin:2px 2px 2px;";
-    head.textContent="My niggles";container.appendChild(head);
+    head.textContent="Body log";container.appendChild(head);
     var sub=document.createElement("div");sub.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;margin:0 2px 10px;";
-    sub.textContent="Anything sore, tight or carrying an injury. Log it once, then check in whenever it changes \u2014 the history shows whether it's settling or creeping up. Saved on this device and included in your backups.";
+    sub.textContent="Niggles, soreness, injuries, illness, headaches \u2014 anything the body is doing that training should know about. Log it once, then check in whenever it changes. Saved on this device and included in your backups.";
     container.appendChild(sub);
 
-    var actives=activeNiggles();
-
-    // --- composer ---
-    var comp=document.createElement("div");comp.className="card";comp.style.cssText="padding:12px;margin-bottom:12px;";
-    var openBtn=document.createElement("button");openBtn.className="btn btn-primary";openBtn.style.cssText="width:100%;padding:10px;font-size:13.5px;";
-    openBtn.textContent="+ Log a new niggle";
-    var form=document.createElement("div");form.style.display="none";form.style.marginTop="10px";
-    openBtn.onclick=function(){ var o=form.style.display==="none"; form.style.display=o?"block":"none"; openBtn.textContent=o?"Cancel":"+ Log a new niggle"; };
-
-    var rowSel=document.createElement("div");rowSel.style.cssText="display:flex;gap:8px;margin-bottom:8px;";
-    var selArea=document.createElement("select");
-    selArea.style.cssText="flex:2;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px;color:"+C.ink+";font-size:14px;";
-    NIGGLE_AREAS.forEach(function(a){ var o=document.createElement("option");o.value=a;o.textContent=a;selArea.appendChild(o); });
-    var selSide=document.createElement("select");
-    selSide.style.cssText="flex:1;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:9px;padding:10px;color:"+C.ink+";font-size:14px;";
-    ["","Left","Right","Both"].forEach(function(s){ var o=document.createElement("option");o.value=s;o.textContent=s||"Side";selSide.appendChild(o); });
-    rowSel.appendChild(selArea);rowSel.appendChild(selSide);form.appendChild(rowSel);
-
-    var sevWrap=document.createElement("div");sevWrap.style.cssText="margin-bottom:8px;";
-    var sevLab=document.createElement("div");sevLab.style.cssText="font-size:12px;color:"+C.muted+";margin-bottom:4px;";
-    var sevIn=document.createElement("input");sevIn.type="range";sevIn.min="1";sevIn.max="10";sevIn.step="1";sevIn.value="3";
-    sevIn.style.cssText="width:100%;accent-color:"+C.glow+";";
-    function sevWord(v){ v=Number(v); return v<=2?"barely there":v<=4?"noticeable, not limiting":v<=6?"affecting how I move":v<=8?"limiting what I can do":"can't train through it"; }
-    function paintSev(){ sevLab.innerHTML="Severity <b>"+sevIn.value+"/10</b> \u2014 "+sevWord(sevIn.value); }
-    sevIn.addEventListener("input",paintSev);paintSev();
-    sevWrap.appendChild(sevLab);sevWrap.appendChild(sevIn);form.appendChild(sevWrap);
-
-    var ta=document.createElement("textarea");ta.placeholder="What it feels like, when it started, what makes it worse\u2026";
-    ta.style.cssText="width:100%;min-height:60px;background:"+C.panel2+";color:"+C.ink+";border:1px solid "+C.line+";border-radius:10px;padding:10px;font-size:14px;font-family:inherit;resize:vertical;";
-    form.appendChild(ta);
-    var save=document.createElement("button");save.className="btn btn-primary";save.style.cssText="margin-top:8px;width:100%;padding:10px;font-size:13.5px;";save.textContent="Save niggle";
-    save.onclick=function(){ addNiggle(selArea.value,selSide.value,sevIn.value,ta.value.trim()); render(false); };
-    form.appendChild(save);
-    comp.appendChild(openBtn);comp.appendChild(form);container.appendChild(comp);
-
-    // --- active list ---
-    if(!actives.length){
-      var none=document.createElement("div");none.className="cnote";none.style.cssText="text-align:center;color:"+C.muted+";padding:14px;";
-      none.textContent="Nothing logged \u2014 body's clear.";container.appendChild(none);
+    if(BL_FORM==="new"){ blForm(container,null); }
+    else {
+      var openBtn=document.createElement("button");openBtn.className="btn btn-primary";openBtn.style.cssText="width:100%;padding:11px;font-size:13.5px;margin-bottom:12px;";
+      openBtn.textContent="+ Log something";
+      openBtn.onclick=function(){ BL_FORM="new"; BL_CHECKIN=null; render(false); };
+      container.appendChild(openBtn);
     }
+
+    var actives=activeBodyEntries();
+    if(!actives.length && BL_FORM!=="new"){
+      var none=document.createElement("div");none.className="cnote";none.style.cssText="text-align:center;color:"+C.muted+";padding:14px;";
+      none.textContent="Nothing logged \u2014 body\u2019s clear.";container.appendChild(none);
+    }
+
     actives.forEach(function(n){
+      if(BL_FORM===n.id){ blForm(container,n); return; }
+      var t=bodyType(n.type);
       var sevCol=n.sev>=8?C.red:n.sev>=5?C.amber:C.green;
       var cd=document.createElement("div");cd.className="card";cd.style.cssText="padding:12px 14px;margin-bottom:10px;border-left:3px solid "+sevCol+";";
       var hist=(n.history||[]);
       var first=hist.length?hist[0].sev:n.sev;
       var dir=hist.length>1?(n.sev<first?"settling":n.sev>first?"getting worse":"unchanged"):"";
       var dirCol=dir==="settling"?C.green:dir==="getting worse"?C.red:C.muted;
+      var title=t.area&&n.area?n.area:t.label;
+      var days=daysSince(n.started)+1;
+
       cd.innerHTML='<div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;">'+
-        '<div style="font-size:15px;font-weight:650;">'+esc(n.area)+(n.side?' <span style="font-size:12px;color:'+C.muted+';font-weight:400;">'+esc(n.side)+'</span>':'')+'</div>'+
+        '<div style="font-size:15px;font-weight:650;">'+esc(title)+
+          (n.side?' <span style="font-size:12px;color:'+C.muted+';font-weight:400;">'+esc(n.side)+'</span>':'')+'</div>'+
         '<div style="font-size:15px;font-weight:700;color:'+sevCol+';">'+n.sev+'/10</div></div>'+
-        '<div style="font-size:11.5px;color:'+C.muted+';margin-top:2px;">day '+(daysSince(n.started)+1)+
-        (dir?' \u00b7 <span style="color:'+dirCol+'">'+dir+'</span> (started at '+first+'/10)':'')+'</div>'+
+        '<div style="font-size:11.5px;color:'+C.muted+';margin-top:3px;">'+
+          '<span style="background:'+C.panel2+';border:1px solid '+C.line+';border-radius:6px;padding:1px 6px;">'+t.label+'</span>'+
+          ' \u00b7 started '+fmtDayFull(n.started)+' \u00b7 day '+days+
+          (dir?' \u00b7 <span style="color:'+dirCol+'">'+dir+'</span> (from '+first+'/10)':'')+'</div>'+
         (n.note?'<div style="font-size:13.5px;line-height:1.5;margin-top:7px;">'+esc(n.note)+'</div>':'');
+
+      // illness cross-check against Oura body temperature for that date
+      if(n.type==="illness"&&model){
+        var day=null;
+        for(var q=0;q<model.length;q++){ if(model[q].iso===n.started){ day=model[q]; break; } }
+        if(day&&day.o_tempdev!=null){
+          var tv=Math.round(day.o_tempdev*100)/100;
+          var warm=tv>=0.3;
+          var tw=document.createElement("div");
+          tw.style.cssText="font-size:12px;color:"+(warm?C.amber:C.muted)+";margin-top:7px;line-height:1.45;";
+          tw.textContent=(warm?"Oura had your body temp "+tv+"\u00b0C above normal that night \u2014 the ring agrees with you."
+                              :"Oura had your body temp "+(tv>=0?"+":"")+tv+"\u00b0C that night, within your normal range.");
+          cd.appendChild(tw);
+        }
+      }
 
       var btns=document.createElement("div");btns.className="btnrow";btns.style.marginTop="10px";
       var bUp=document.createElement("button");bUp.className="btn btn-ghost";bUp.style.cssText="padding:7px 12px;font-size:12.5px;";bUp.textContent="Check in";
-      bUp.onclick=function(){
-        var s=prompt("How is the "+n.area.toLowerCase()+" today? (1\u201310, "+n.sev+" last time)",String(n.sev));
-        if(s==null||s==="") return;
-        var v=Number(s); if(!isFinite(v)||v<1||v>10){ alert("Enter a number from 1 to 10."); return; }
-        var nt=prompt("Anything to add? (optional)","")||"";
-        updateNiggle(n.id,v,nt.trim()); render(false);
-      };
+      bUp.onclick=function(){ BL_CHECKIN=(BL_CHECKIN===n.id?null:n.id); BL_FORM=null; render(false); };
+      var bEd=document.createElement("button");bEd.className="btn btn-ghost";bEd.style.cssText="padding:7px 12px;font-size:12.5px;";bEd.textContent="Edit";
+      bEd.onclick=function(){ BL_FORM=n.id; BL_CHECKIN=null; render(false); };
       var bDone=document.createElement("button");bDone.className="btn btn-ghost";bDone.style.cssText="padding:7px 12px;font-size:12.5px;";bDone.textContent="Resolved";
-      bDone.onclick=function(){ if(confirm("Mark the "+n.area.toLowerCase()+" as resolved?")){ setNiggleStatus(n.id,"resolved"); render(false); } };
+      bDone.onclick=function(){
+        var d=prompt("Resolved on which date? (YYYY-MM-DD)",isoToday());
+        if(d==null) return;
+        d=d.trim()||isoToday();
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(d)){ alert("Use the format YYYY-MM-DD."); return; }
+        setBodyStatus(n.id,"resolved",d); render(false);
+      };
       var bDel=document.createElement("button");bDel.className="btn btn-ghost";bDel.style.cssText="padding:7px 12px;font-size:12.5px;color:"+C.muted+";";bDel.textContent="Delete";
-      bDel.onclick=function(){ if(confirm("Delete this entry completely?")){ deleteNiggle(n.id); render(false); } };
-      btns.appendChild(bUp);btns.appendChild(bDone);btns.appendChild(bDel);cd.appendChild(btns);
+      bDel.onclick=function(){ if(confirm("Delete this entry and all its check-ins?")){ deleteBodyEntry(n.id); render(false); } };
+      btns.appendChild(bUp);btns.appendChild(bEd);btns.appendChild(bDone);btns.appendChild(bDel);cd.appendChild(btns);
 
-      if(hist.length>1){
-        var det=document.createElement("details");det.style.cssText="margin-top:8px;";
-        var sm=document.createElement("summary");sm.style.cssText="font-size:12px;color:"+C.muted+";cursor:pointer;";sm.textContent=hist.length+" check-ins";
-        var body=document.createElement("div");body.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.6;margin-top:6px;";
-        body.innerHTML=hist.slice().reverse().map(function(h){
-          return new Date(h.date+"T00:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short"})+" \u2014 <b>"+h.sev+"/10</b>"+(h.note?" \u00b7 "+esc(h.note):"");
-        }).join("<br>");
-        det.appendChild(sm);det.appendChild(body);cd.appendChild(det);
+      if(BL_CHECKIN===n.id) blCheckInForm(cd,n);
+
+      if(hist.length>=1){
+        var det=document.createElement("details");det.style.cssText="margin-top:9px;";
+        if(BL_HIST&&hist.some(function(h){return h.id===BL_HIST;})) det.open=true;
+        var sm=document.createElement("summary");sm.style.cssText="font-size:12px;color:"+C.muted+";cursor:pointer;";
+        sm.textContent=hist.length+" check-in"+(hist.length===1?"":"s")+" \u00b7 tap to edit";
+        det.appendChild(sm);
+        hist.slice().reverse().forEach(function(h){
+          var line=document.createElement("div");
+          line.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;margin-top:6px;padding:6px 8px;background:"+C.panel+";border-radius:8px;cursor:pointer;";
+          line.innerHTML="<b style='color:"+C.ink+"'>"+h.sev+"/10</b> \u00b7 "+fmtDay(h.date)+(h.time?" "+h.time:"")+(h.note?"<br>"+esc(h.note):"");
+          line.onclick=function(){ BL_HIST=(BL_HIST===h.id?null:h.id); render(false); };
+          det.appendChild(line);
+          if(BL_HIST===h.id) blHistEditor(det,n,h);
+        });
+        cd.appendChild(det);
       }
       container.appendChild(cd);
     });
 
-    // --- resolved, tucked away ---
-    var done=getNiggles().filter(function(x){return x.status==="resolved";});
+    // resolved, tucked away
+    var done=getBodyLog().filter(function(x){return x.status==="resolved";});
     if(done.length){
       var dd=document.createElement("details");dd.style.cssText="background:"+C.panel+";border:1px solid "+C.line+";border-radius:12px;margin-bottom:14px;overflow:hidden;";
       var ds=document.createElement("summary");ds.style.cssText="padding:12px 14px;font-size:13px;font-weight:600;cursor:pointer;color:"+C.muted+";list-style:none;";
       ds.textContent=done.length+" resolved";
-      var db=document.createElement("div");db.style.cssText="padding:0 14px 12px;font-size:12.5px;color:"+C.muted+";line-height:1.7;";
-      db.innerHTML=done.map(function(n){
-        return esc(n.area)+(n.side?" ("+esc(n.side)+")":"")+" \u2014 "+daysSince(n.started)+" days, cleared "+
-          (n.resolvedOn?new Date(n.resolvedOn+"T00:00:00").toLocaleDateString("en-GB",{day:"numeric",month:"short"}):"");
-      }).join("<br>");
+      var db=document.createElement("div");db.style.cssText="padding:0 14px 12px;";
+      done.forEach(function(n){
+        var t=bodyType(n.type);
+        var r=document.createElement("div");r.style.cssText="font-size:12.5px;color:"+C.muted+";line-height:1.5;padding:7px 0;border-top:1px solid "+C.line+";display:flex;justify-content:space-between;gap:8px;align-items:center;";
+        var span=(n.resolvedOn?daysBetween(n.started,n.resolvedOn):daysSince(n.started))+1;
+        r.innerHTML='<span>'+esc(t.area&&n.area?n.area:t.label)+(n.side?" ("+esc(n.side)+")":"")+
+          ' \u00b7 '+span+' day'+(span===1?"":"s")+' \u00b7 cleared '+(n.resolvedOn?fmtDay(n.resolvedOn):"\u2014")+'</span>';
+        var re=document.createElement("button");re.className="btn btn-ghost";re.style.cssText="padding:5px 9px;font-size:11.5px;";re.textContent="Reopen";
+        re.onclick=function(){ setBodyStatus(n.id,"active"); render(false); };
+        r.appendChild(re);db.appendChild(r);
+      });
       dd.appendChild(ds);dd.appendChild(db);container.appendChild(dd);
     }
 
@@ -2772,12 +3052,12 @@
 
   function buildPhysio(container,model){
     destroyCharts(); // this tab has no charts; clear any left over from the previous tab
-    // ---- YOUR NIGGLES: local-first, works with or without team sync ----
-    if(!isViewer()) buildNiggles(container);
+    // ---- BODY LOG: local-first, works with or without team sync ----
+    if(!isViewer()) buildNiggles(container,model);
 
     if(!teamConfigured()){
       var w=document.createElement("div");w.className="cnote";w.style.cssText="text-align:center;color:"+C.muted+";padding:18px;line-height:1.5;";
-      w.textContent="Shared session notes need team sync set up. Your niggles above are saved on this device either way.";
+      w.textContent="Shared session notes need team sync set up. Your body log above is saved on this device either way.";
       container.appendChild(w);return;
     }
     // load notes once per tab open
@@ -3493,7 +3773,7 @@
           scoreLocks:getLocks(),                   // the permanent morning score for every day
           flags:getJSON(K_FLAGHIST,{}),            // tournament / travel per day
           notes:getJSON(K_NOTES,{}),               // your own per-day notes
-          niggles:getNiggles(),                    // body niggles / injuries + their history
+          niggles:getBodyLog(),                    // body log: niggles, soreness, injury, illness + history
           logHist:getJSON(K_LOGHIST,[]),           // sessions logged in-app (+velocities)
           gymCache:getJSON(K_GYM,null),            // cached programme
           exAlias:getJSON(K_EXALIAS,{}),           // canonical exercise names + learned aliases
