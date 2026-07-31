@@ -168,7 +168,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
   var GYM_URL="https://script.google.com/macros/s/AKfycbyIgdhH7JNT5N915Lj1UTbetvNieTz6JdcXV8vDygxwCY4hr5txxN7YDrxynEnzl-xp/exec";
 
-  var APP_VERSION="v16.0";
+  var APP_VERSION="v16.1";
   var APP_VERSION_NAME="timezone fix + cloud backup";
   var APP_VERSION_DATE="30 Jul 2026";
   var APP_CHANGELOG=[
@@ -630,6 +630,15 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     for(var i=0;i<n;i++){var dx=xs[i]-mx;num+=dx*(ys[i]-my);den+=dx*dx;}if(!den)return null;
     var m=num/den;return {m:m,b:my-m*mx};}
 
+  // The header calls this "Latest reading", and that's exactly what it should be: the most
+  // recent day carrying data. Taking the raw last row let an empty trailing day (a future
+  // Oura record, or today before you've synced) blank the whole app out to onboarding.
+  function pickToday(model){
+    if(!model||!model.length) return null;
+    for(var i=model.length-1;i>=0;i--){ if(model[i].has) return model[i]; }
+    return model[model.length-1];
+  }
+
   // ---------- data fusion ----------
   // Build a per-day map keyed by YYYY-MM-DD merging 360HP rows + Oura cache.
   function fuse(){
@@ -713,8 +722,11 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         }
       });
     }
-    // to sorted array
-    var arr=Object.keys(days).sort().map(function(k){return days[k];});
+    // to sorted array. Oura rolls to a new UTC day ~8pm US time, so its cache can hold a
+    // record dated TOMORROW. A day that hasn't happened locally isn't a day — drop it,
+    // otherwise it sorts last and gets mistaken for "today".
+    var cap=isoToday();
+    var arr=Object.keys(days).sort().filter(function(k){return k<=cap;}).map(function(k){return days[k];});
     return arr;
   }
 
@@ -3197,7 +3209,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       return;
     }
     var gym=getJSON(K_GYM,null);
-    var today=model.length?model[model.length-1]:null;
+    var today=pickToday(model);
 
     // status + sync
     var bar=document.createElement("div");bar.className="sync";
@@ -4163,7 +4175,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     var arr, model;
     if(viewer && VIEWER_MODEL){ model=VIEWER_MODEL; arr=VIEWER_MODEL; }
     else { arr=fuse(); model=arr.length?analyze(arr):[]; }
-    var today=model.length?model[model.length-1]:null;
+    var today=pickToday(model);
 
     // LOGIN GATE: show a login screen first for anyone who isn't signed in and has no local data.
     // The owner's own device has local data, so it skips this and opens normally. A team member's
