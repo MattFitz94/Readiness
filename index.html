@@ -168,7 +168,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
   var GYM_URL="https://script.google.com/macros/s/AKfycbyIgdhH7JNT5N915Lj1UTbetvNieTz6JdcXV8vDygxwCY4hr5txxN7YDrxynEnzl-xp/exec";
 
-  var APP_VERSION="v16.1";
+  var APP_VERSION="v16.2";
   var APP_VERSION_NAME="timezone fix + cloud backup";
   var APP_VERSION_DATE="30 Jul 2026";
   var APP_CHANGELOG=[
@@ -637,6 +637,50 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     if(!model||!model.length) return null;
     for(var i=model.length-1;i>=0;i--){ if(model[i].has) return model[i]; }
     return model[model.length-1];
+  }
+
+  // ===== OURA CACHE COMPACTION ===========================================
+  // The relay stores Oura's full nightly payload. fuse() reads roughly fifteen fields
+  // from it; the rest is dead weight multiplied by every night since 2021. This keeps
+  // exactly what the app consumes and discards the remainder.
+  // NOTE: if a future relay adds a field fuse() reads, add it to these lists too,
+  // otherwise compaction will strip it back out on the next run.
+  var OURA_KEEP_DETAIL = ["average_hrv","lowest_heart_rate","average_heart_rate",
+    "total_sleep_hours","total_sleep_duration","total_sleep_seconds","duration","time_in_bed",
+    "efficiency","deep_sleep_hours","rem_sleep_hours","light_sleep_hours",
+    "restless_pct","restless_percent","restfulness","restfulness_score","restless_periods",
+    "restlessness","bedtime_start","bedtime_end"];
+  var OURA_KEEP_READY = ["day","score","temperature_deviation"];
+  var OURA_KEEP_SLEEP = ["day","score","total_sleep_hours","total_sleep_duration","duration"];
+
+  function pick(obj,keys){
+    if(!obj||typeof obj!=="object") return obj;
+    var o={}; keys.forEach(function(k){ if(obj[k]!==undefined && obj[k]!==null) o[k]=obj[k]; });
+    return o;
+  }
+  function compactOura(){
+    var raw=localStorage.getItem(K_OURA);
+    if(!raw) return {ok:false,msg:"No Oura cache on this device."};
+    var before=raw.length*2;
+    var o; try{ o=JSON.parse(raw); }catch(e){ return {ok:false,msg:"Couldn't read the Oura cache."}; }
+    var out={};
+    out.readiness=(o.readiness||[]).map(function(r){
+      var x=pick(r,OURA_KEEP_READY);
+      if(r.contributors) x.contributors=pick(r.contributors,["hrv_balance","resting_heart_rate"]);
+      return x;
+    });
+    out.daily_sleep=(o.daily_sleep||[]).map(function(r){ return pick(r,OURA_KEEP_SLEEP); });
+    out.sleep_detail={};
+    var det=o.sleep_detail||{};
+    Object.keys(det).forEach(function(day){ out.sleep_detail[day]=pick(det[day],OURA_KEEP_DETAIL); });
+    // carry through anything else at the top level untouched
+    Object.keys(o).forEach(function(k){ if(!(k in out)) out[k]=o[k]; });
+
+    var json=JSON.stringify(out);
+    var after=json.length*2;
+    if(after>=before) return {ok:true,before:before,after:after,saved:0,msg:"Already compact \u2014 nothing to remove."};
+    if(!set(K_OURA,json)) return {ok:false,msg:"Couldn't write the compacted cache."};
+    return {ok:true, before:before, after:after, saved:before-after};
   }
 
   // ---------- data fusion ----------
@@ -4552,6 +4596,23 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         (srep.items[0]?("  \u00b7  biggest: "+srep.items[0].k+" "+kb(srep.items[0].b)):"")+
         (srep.total>3145728?"  \u2014 getting close to Safari's ~5 MB limit.":"");
       body.appendChild(sline);
+      if(srep.total>2097152){
+        var cbtn=document.createElement("button");cbtn.className="btn btn-ghost";
+        cbtn.style.cssText="padding:8px 13px;font-size:12.5px;margin:0 2px 10px;";
+        cbtn.textContent="Compact Oura cache";
+        var cmsg=document.createElement("div");cmsg.style.cssText="font-size:11.5px;color:"+C.muted+";margin:0 2px 10px;line-height:1.5;";
+        cbtn.onclick=function(){
+          if(!confirm("Trim the Oura cache down to the fields this app actually uses?\n\nNothing you can see in the app changes. Anything removed re-downloads on the next Oura sync.\n\nBack up first if you haven't.")) return;
+          cbtn.textContent="Compacting\u2026";
+          var r=compactOura();
+          cbtn.textContent="Compact Oura cache";
+          if(!r.ok){ cmsg.style.color=C.amber; cmsg.textContent=r.msg; return; }
+          cmsg.style.color=C.glow;
+          cmsg.textContent=r.saved?("Freed "+kb(r.saved)+" \u2014 Oura cache now "+kb(r.after)+"."):(r.msg||"Already compact.");
+          setTimeout(function(){ render(false); },1200);
+        };
+        body.appendChild(cbtn);body.appendChild(cmsg);
+      }
       var bx=document.createElement("button");bx.className="btn btn-ghost";bx.textContent="Export data";bx.onclick=function(){exportMyData(model);};
       btns.appendChild(bx);
       var bimg=document.createElement("button");bimg.className="btn btn-ghost";bimg.textContent="Export image";bimg.onclick=function(){ exportTodayImage(today, bimg); };
