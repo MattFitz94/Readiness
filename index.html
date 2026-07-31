@@ -20,6 +20,11 @@
 
 <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
 <script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+/* If unpkg is blocked, slow, or the path moves, fall back to jsDelivr. Written during
+   head parsing so it stays synchronous and window.supabase exists before the app runs. */
+if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"><\/scr'+'ipt>');}
+</script>
 
 <style>
   :root{ color-scheme:dark; }
@@ -602,8 +607,16 @@
   // ---------- helpers ----------
   function parseCSV(t){var L=t.trim().split(/\r?\n/);var H=L[0].split(",").map(function(h){return h.trim();});
     return L.slice(1).map(function(l){var p=l.split(",");var o={};H.forEach(function(h,i){o[h]=(p[i]!=null?p[i]:"").trim();});return o;});}
-  function pDate(s){var p=s.split("-").map(Number);return new Date(p[2],p[1]-1,p[0]);}       // DD-MM-YYYY (360HP)
-  function isoDate(d){return d.toISOString().slice(0,10);}                                    // YYYY-MM-DD
+  // 360HP exports DD-MM-YYYY. Also tolerate YYYY-MM-DD in case their format ever changes.
+  function pDate(s){
+    var t=String(s||"").trim().split(/[-\/]/).map(Number);
+    if(t.length!==3||t.some(isNaN)) return new Date(NaN);
+    if(String(s).trim().split(/[-\/]/)[0].length===4) return new Date(t[0],t[1]-1,t[2]); // YYYY-MM-DD
+    return new Date(t[2],t[1]-1,t[0]);                                                    // DD-MM-YYYY
+  }
+  // Was toISOString().slice(0,10) — that builds a LOCAL midnight then reads the date back
+  // in UTC, so every 360HP row landed a day early anywhere east of Greenwich (the UK included).
+  function isoDate(d){ return isoLocal(d); }
   function fmt(d){return d.toLocaleDateString("en-GB",{day:"2-digit",month:"short"});}
   function median(a){if(!a.length)return null;var s=a.slice().sort(function(x,y){return x-y;});var m=Math.floor(s.length/2);return s.length%2?s[m]:(s[m-1]+s[m])/2;}
   function mean(a){if(!a.length)return null;return a.reduce(function(x,y){return x+y;},0)/a.length;}
@@ -2885,7 +2898,7 @@
     var sD=document.createElement("input");sD.type="date";sD.style.cssText="flex:2;"+BL_INPUT;
     var sT=document.createElement("input");sT.type="time";sT.style.cssText="flex:1;"+BL_INPUT;
     var at=entry?new Date(entry.at||nowIso()):new Date();
-    sD.value=at.toISOString().slice(0,10);
+    sD.value=isoLocal(at);
     sT.value=String(at.getHours()).padStart(2,"0")+":"+String(at.getMinutes()).padStart(2,"0");
     stampRow.appendChild(sD);stampRow.appendChild(sT);stampWrap.appendChild(stampRow);
     var stampNote=document.createElement("div");stampNote.style.cssText="font-size:11px;color:"+C.muted+";margin-top:4px;line-height:1.4;";
@@ -3985,7 +3998,20 @@
     card.appendChild(h);card.appendChild(sub);
 
     if(!cloudConfigured()){
-      sub.textContent="Couldn't load the backup library — check your connection and reopen the app. Your file backups still work.";
+      sub.innerHTML="<b style='color:"+C.amber+"'>The backup library didn't load, so there's nothing to sign in to.</b><br>"+
+        "Both CDNs were unreachable \u2014 usually no connection when the app opened, or a network blocking them. "+
+        "Everything else works; your file backups are unaffected.";
+      var rt=document.createElement("button");rt.className="btn btn-ghost";
+      rt.style.cssText="margin-top:10px;padding:9px 14px;font-size:13px;";rt.textContent="Try loading it again";
+      rt.onclick=function(){
+        rt.textContent="Loading\u2026";
+        var sc=document.createElement("script");
+        sc.src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2";
+        sc.onload=function(){ render(false); };
+        sc.onerror=function(){ rt.textContent="Still can't reach it \u2014 check your connection"; };
+        document.head.appendChild(sc);
+      };
+      card.appendChild(rt);
       container.appendChild(card);return;
     }
 
@@ -4160,7 +4186,16 @@
     fileInput.addEventListener("change",function(ev){var f=ev.target.files&&ev.target.files[0];if(!f)return;
       var rd=new FileReader();rd.onload=function(x){try{var p=parseCSV(x.target.result);
         if(!p.length||!("rMSSD" in p[0])){alert("That file doesn't look like a 360HP export \u2014 no rMSSD column found.");return;}
-        setJSON(K_ROWS,p);
+        var wrote=setJSON(K_ROWS,p);
+        var back=null; try{ back=JSON.parse(localStorage.getItem(K_ROWS)||"null"); }catch(e2){}
+        if(!wrote || !Array.isArray(back) || back.length!==p.length){
+          var rp=storageReport();
+          alert("\u26a0\ufe0f The import did NOT save.\n\nThis device's storage is refusing writes"+
+                (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\nIn use: "+kb(rp.total)+
+                (rp.items[0]?("\nBiggest: "+rp.items[0].k+" "+kb(rp.items[0].b)):"")+
+                "\n\nThat is why nothing changed on screen. Back up, then clear space.");
+          render(false); return;
+        }
         try{ clearLock(isoToday()); }catch(e){} // new 360HP CSV = the real morning reading arriving; re-take TODAY only. Past locks are never touched.
         render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
       rd.readAsText(f);});
@@ -4338,7 +4373,7 @@
       } else if(RANGE!=="all"&&RANGE!=="custom"){
         var days=parseInt(RANGE,10);
         var cutoff=new Date(); cutoff.setDate(cutoff.getDate()-days);
-        var cutISO=cutoff.toISOString().slice(0,10);
+        var cutISO=isoLocal(cutoff);
         fmodel=model.filter(function(d){return d.iso>=cutISO;});
       }
       if(fmodel!==model && fmodel.length<2){
