@@ -19,6 +19,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
 
 <script src="https://unpkg.com/chart.js@4.4.3/dist/chart.umd.js"></script>
+<script src="https://unpkg.com/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 
 <style>
   :root{ color-scheme:dark; }
@@ -353,7 +354,19 @@
     if(changed){ try{ setJSON(K_NIGGLES,n); }catch(e){} }
     return n;
   }
-  function saveBodyLog(n){ setJSON(K_NIGGLES,n); }
+  function saveBodyLog(n){
+    var ok=setJSON(K_NIGGLES,n);
+    // read back — the only honest proof it persisted
+    var back=null; try{ back=JSON.parse(localStorage.getItem(K_NIGGLES)||"null"); }catch(e){}
+    if(!ok || !Array.isArray(back) || back.length!==n.length){
+      var r=storageReport();
+      alert("\u26a0\ufe0f Your body log did NOT save.\n\nThis device's storage is refusing writes"+
+            (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\nUsing about "+kb(r.total)+
+            ".\n\nUse \u201cBack up everything\u201d on the Today tab now, then free up space.");
+      return false;
+    }
+    return true;
+  }
   function getNiggles(){ return getBodyLog(); }          // kept for the backup snapshot
 
   function addBodyEntry(o){
@@ -558,9 +571,33 @@
   }
 
   function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
-  function set(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+  // A failed localStorage write used to be swallowed here, so the UI said "saved"
+  // and nothing persisted. Now it records the failure so the app can shout about it.
+  var STORAGE_ERR=null;
+  function set(k,v){
+    try{ localStorage.setItem(k,v); return true; }
+    catch(e){
+      STORAGE_ERR={ key:k, name:(e&&e.name)||"StorageError", msg:(e&&e.message)||"" };
+      try{ console.error("localStorage write FAILED for "+k, e); }catch(_){}
+      return false;
+    }
+  }
+  // Rough bytes used by this origin, and the biggest offenders.
+  function storageReport(){
+    var items=[], total=0;
+    try{
+      for(var i=0;i<localStorage.length;i++){
+        var k=localStorage.key(i); var v=localStorage.getItem(k)||"";
+        var b=(k.length+v.length)*2;            // UTF-16
+        total+=b; items.push({k:k,b:b});
+      }
+    }catch(e){}
+    items.sort(function(a,b){return b.b-a.b;});
+    return { total:total, items:items };
+  }
+  function kb(b){ return b>=1048576?(b/1048576).toFixed(2)+" MB":Math.round(b/1024)+" KB"; }
   function getJSON(k,f){try{var s=localStorage.getItem(k);return s?JSON.parse(s):f;}catch(e){return f;}}
-  function setJSON(k,v){set(k,JSON.stringify(v));}
+  function setJSON(k,v){ return set(k,JSON.stringify(v)); }
 
   // ---------- helpers ----------
   function parseCSV(t){var L=t.trim().split(/\r?\n/);var H=L[0].split(",").map(function(h){return h.trim();});
@@ -2197,7 +2234,7 @@
       if(d.o_readiness!=null) meta.push("Oura "+d.o_readiness);
       row.innerHTML='<div class="histscore" style="color:'+bc+'">'+d.score100+'</div>'+
         '<div class="histmid"><div class="histdate">'+dateStr+'</div>'+
-        '<div class="histword" style="color:'+bc+'">'+VERD[d.band].w+' \u00b7 '+VERD[d.band].h+'</div>'+
+        '<div class="histword" style="color:'+bc+'">'+VERD[d.band].h+'</div>'+
         '<div class="histmeta">'+meta.join("  \u00b7  ")+'</div></div>'+
         '<div style="color:'+C.muted+';font-size:20px">'+(histOpen===d.iso?"\u2013":"+")+'</div>';
       row.onclick=function(){ histOpen=(histOpen===d.iso?null:d.iso); render(false); };
@@ -3765,11 +3802,9 @@
     container.appendChild(d);
   }
 
-  async function backupEverything(model){
-    var statusBtn=arguments[1]||null;
-    try{
-      if(statusBtn) statusBtn.textContent="Backing up\u2026";
-      var stamp=isoToday();
+  // Builds the full snapshot object. Shared by the file backup and the cloud push
+  // so the two can never drift apart.
+  function buildSnapshot(model){
       var snap={
         _type:"readiness-full-backup",
         _version:1,
@@ -3798,27 +3833,19 @@
         },
         team:{ daily_readiness:[], session_notes:[], gym_logs:[], team_members:[] }
       };
+      snap.team._note="Team sync not in use \u2014 local data only.";
+      return snap;
+  }
 
-      // pull the team database too (so notes + gym logs from the whole staff are captured)
-      if(_teamSB){
-        try{
-          var s=await _teamSB.auth.getSession();
-          if(s.data.session){
-            var a=await _teamSB.from("daily_readiness").select("*").order("day",{ascending:true});
-            snap.team.daily_readiness=a.data||[];
-            var b=await _teamSB.from("session_notes").select("*").order("created_at",{ascending:false});
-            snap.team.session_notes=b.data||[];
-            var c=await _teamSB.from("gym_logs").select("*").order("created_at",{ascending:false});
-            snap.team.gym_logs=c.data||[];
-            var e=await _teamSB.from("team_members").select("email,full_name,role,active");
-            snap.team.team_members=e.data||[];
-          }
-        }catch(te){ snap.team._error="Couldn't reach the team database (are you signed in?): "+te.message; }
-      } else {
-        snap.team._note="Team sync not configured on this device — local data only.";
-      }
+  async function backupEverything(model){
+    var statusBtn=arguments[1]||null;
+    try{
+      if(statusBtn) statusBtn.textContent="Backing up\u2026";
+      var stamp=isoToday();
+      var snap=buildSnapshot(model);
 
       var json=JSON.stringify(snap,null,2);
+      set(K_FILELAST, isoToday());
       var name="readiness-backup-"+stamp+".json";
       var blob=new Blob([json],{type:"application/json;charset=utf-8;"});
       var url=URL.createObjectURL(blob);
@@ -3831,6 +3858,227 @@
       if(statusBtn) statusBtn.textContent="Back up everything";
       alert("Backup failed: "+err.message);
     }
+  }
+
+  // ===== CLOUD BACKUP ====================================================
+  // Backup ONLY. This deliberately does not revive the team/login system — the app
+  // stays fully usable signed out, and signing in is needed only to push or pull a
+  // snapshot. Nothing here gates the UI.
+  //
+  // Why it exists: "Clear History and Website Data" in Safari wipes every local key
+  // this app owns. Nothing stored on the device survives that button, so the only
+  // real protection is a copy held off the device.
+  var CLOUD_URL = "https://etywwgtydhvnqxsuugty.supabase.co";
+  var CLOUD_KEY = "sb_publishable_tpiJR6llKLVKdczfktOy5w_QE024iVa";
+  var CLOUD_KEEP = 10;          // snapshots retained; older ones are pruned
+  var NAG_DAYS   = 7;           // nag if the newest backup (cloud or file) is older
+  var K_CLOUDLAST = "readiness_cloud_last_v1";   // ISO date of last successful cloud push
+  var K_FILELAST  = "readiness_file_last_v1";    // ISO date of last file backup
+
+  var _cloudSB = null, _cloudUser = null, _cloudTried = false;
+
+  function cloudConfigured(){ return !!(CLOUD_URL && CLOUD_KEY && window.supabase); }
+  function cloudSB(){
+    if(!cloudConfigured()) return null;
+    if(!_cloudSB){
+      try{ _cloudSB = window.supabase.createClient(CLOUD_URL, CLOUD_KEY); }
+      catch(e){ console.error("cloud client failed", e); return null; }
+    }
+    return _cloudSB;
+  }
+  // NOTE: no onAuthStateChange listener on purpose. A previous build re-rendered on
+  // TOKEN_REFRESHED and wiped in-progress Training inputs. Sessions are read on demand.
+  async function cloudSession(){
+    var sb=cloudSB(); if(!sb) return null;
+    try{ var s=await sb.auth.getSession(); _cloudUser=(s.data&&s.data.session)?s.data.session.user:null; return _cloudUser; }
+    catch(e){ return null; }
+  }
+  async function cloudSignIn(email,pw){
+    var sb=cloudSB(); if(!sb) return {ok:false,msg:"Cloud backup isn't configured."};
+    try{
+      var r=await sb.auth.signInWithPassword({email:(email||"").trim(), password:pw||""});
+      if(r.error) return {ok:false,msg:r.error.message};
+      _cloudUser=r.data.user; return {ok:true};
+    }catch(e){ return {ok:false,msg:e.message||"Couldn't sign in."}; }
+  }
+  async function cloudSignOut(){
+    var sb=cloudSB(); if(!sb) return;
+    try{ await sb.auth.signOut(); }catch(e){}
+    _cloudUser=null;
+  }
+
+  // Push one snapshot, then prune to the newest CLOUD_KEEP.
+  async function cloudPush(model,label){
+    var sb=cloudSB(); if(!sb) return {ok:false,msg:"Cloud backup isn't configured."};
+    var u=await cloudSession();
+    if(!u) return {ok:false,msg:"Not signed in."};
+    try{
+      var snap=buildSnapshot(model);
+      var payload=JSON.stringify(snap);
+      var mb=payload.length/1048576;
+      if(mb>8) return {ok:false,msg:"Snapshot is "+mb.toFixed(1)+" MB — too big to push. Prune the Oura cache first."};
+      var ins=await sb.from("app_backups").insert({ user_id:u.id, label:label||("auto "+isoToday()), payload:payload });
+      if(ins.error) return {ok:false,msg:ins.error.message};
+      set(K_CLOUDLAST, isoToday());
+      // prune
+      try{
+        var all=await sb.from("app_backups").select("id,created_at").order("created_at",{ascending:false});
+        var rows=(all.data||[]);
+        if(rows.length>CLOUD_KEEP){
+          var kill=rows.slice(CLOUD_KEEP).map(function(r){return r.id;});
+          await sb.from("app_backups").delete().in("id",kill);
+        }
+      }catch(pe){}
+      return {ok:true, size:mb};
+    }catch(e){ return {ok:false,msg:e.message||"Push failed."}; }
+  }
+
+  async function cloudList(){
+    var sb=cloudSB(); if(!sb) return [];
+    var u=await cloudSession(); if(!u) return [];
+    try{
+      var r=await sb.from("app_backups").select("id,created_at,label").order("created_at",{ascending:false});
+      return r.data||[];
+    }catch(e){ return []; }
+  }
+  async function cloudFetch(id){
+    var sb=cloudSB(); if(!sb) return null;
+    try{
+      var r=await sb.from("app_backups").select("payload").eq("id",id).single();
+      if(r.error||!r.data) return null;
+      return JSON.parse(r.data.payload);
+    }catch(e){ return null; }
+  }
+
+  // Newest backup of any kind, in days. null = never backed up.
+  function backupAgeDays(){
+    var c=get(K_CLOUDLAST), f=get(K_FILELAST);
+    var best=null;
+    [c,f].forEach(function(d){ if(d && (!best || d>best)) best=d; });
+    return best?daysSince(best):null;
+  }
+
+  // Once a day, quietly, if signed in. Never blocks the UI.
+  var _autoPushDone=false;
+  function cloudAutoPush(model){
+    if(_autoPushDone || !cloudConfigured()) return;
+    _autoPushDone=true;
+    if(get(K_CLOUDLAST)===isoToday()) return;      // already pushed today
+    setTimeout(function(){
+      cloudSession().then(function(u){
+        if(!u) return;
+        cloudPush(model,"auto "+isoToday()).then(function(r){
+          if(r.ok){ try{ console.log("cloud backup pushed ("+r.size.toFixed(2)+" MB)"); }catch(e){} }
+        });
+      });
+    }, 2500);
+  }
+
+  // ---- Cloud backup card (Today tab) ----
+  function buildCloudCard(container, model){
+    var card=document.createElement("div");card.className="card";card.style.marginTop="14px";
+    var h=document.createElement("div");
+    h.style.cssText="font-family:'Fraunces',serif;font-size:16px;font-weight:600;color:"+C.ink+";margin-bottom:2px;";
+    h.textContent="Cloud backup";
+    var sub=document.createElement("div");
+    sub.style.cssText="font-size:12px;color:"+C.muted+";line-height:1.5;margin-bottom:10px;";
+    card.appendChild(h);card.appendChild(sub);
+
+    if(!cloudConfigured()){
+      sub.textContent="Couldn't load the backup library — check your connection and reopen the app. Your file backups still work.";
+      container.appendChild(card);return;
+    }
+
+    var age=backupAgeDays();
+    var lastLine=document.createElement("div");
+    lastLine.style.cssText="font-size:12px;margin-bottom:10px;line-height:1.5;color:"+
+      ((age==null||age>NAG_DAYS)?C.amber:C.muted)+";";
+    lastLine.textContent=(age==null)?"No backup recorded yet on this device."
+      :(age===0?"Last backup: today.":"Last backup: "+age+" day"+(age===1?"":"s")+" ago.");
+    card.appendChild(lastLine);
+
+    var msg=document.createElement("div");
+    msg.style.cssText="font-size:12px;color:"+C.muted+";margin-top:8px;line-height:1.5;min-height:16px;";
+
+    cloudSession().then(function(u){
+      if(!u){
+        sub.textContent="Sign in to keep a copy off this device. Clearing Safari's website data wipes everything stored locally \u2014 this is what survives it.";
+        var f=document.createElement("div");f.style.cssText="display:flex;flex-direction:column;gap:8px;";
+        var IN="background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:11px;color:"+C.ink+";font-size:15px;";
+        var em=document.createElement("input");em.type="email";em.inputMode="email";em.autocomplete="username";em.placeholder="your email";em.style.cssText=IN;
+        var pw=document.createElement("input");pw.type="password";pw.autocomplete="current-password";pw.placeholder="password";pw.style.cssText=IN;
+        var go=document.createElement("button");go.className="btn btn-primary";go.style.cssText="padding:11px 16px;font-size:14px;";go.textContent="Sign in";
+        go.onclick=async function(){
+          go.textContent="Signing in\u2026"; msg.style.color=C.muted; msg.textContent="";
+          var r=await cloudSignIn(em.value, pw.value);
+          go.textContent="Sign in";
+          if(r.ok){ render(false); } else { msg.style.color=C.amber; msg.textContent=r.msg; }
+        };
+        f.appendChild(em);f.appendChild(pw);f.appendChild(go);
+        card.appendChild(f);card.appendChild(msg);
+        return;
+      }
+
+      sub.textContent="Signed in as "+u.email+". A snapshot goes up automatically once a day; the last "+CLOUD_KEEP+" are kept.";
+
+      var row=document.createElement("div");row.className="btnrow";
+      var bUp=document.createElement("button");bUp.className="btn btn-primary";bUp.style.cssText="flex:1;";bUp.textContent="Back up now";
+      bUp.onclick=async function(){
+        bUp.textContent="Backing up\u2026"; msg.style.color=C.muted; msg.textContent="";
+        var r=await cloudPush(model,"manual "+isoToday());
+        bUp.textContent="Back up now";
+        if(r.ok){ msg.style.color=C.glow; msg.textContent="Saved to the cloud ("+r.size.toFixed(2)+" MB)."; }
+        else { msg.style.color=C.amber; msg.textContent=r.msg; }
+      };
+      var bDn=document.createElement("button");bDn.className="btn btn-ghost";bDn.style.cssText="flex:1;";bDn.textContent="Restore from cloud";
+      var picker=document.createElement("div");picker.style.cssText="margin-top:10px;display:none;";
+      bDn.onclick=async function(){
+        if(picker.style.display==="block"){ picker.style.display="none"; return; }
+        picker.style.display="block"; picker.innerHTML="";
+        var load=document.createElement("div");load.style.cssText="font-size:12px;color:"+C.muted+";";load.textContent="Loading snapshots\u2026";
+        picker.appendChild(load);
+        var list=await cloudList();
+        picker.innerHTML="";
+        if(!list.length){
+          var none=document.createElement("div");none.style.cssText="font-size:12px;color:"+C.muted+";";
+          none.textContent="No snapshots in the cloud yet. Tap \u201cBack up now\u201d first.";
+          picker.appendChild(none);return;
+        }
+        var sel=document.createElement("select");
+        sel.style.cssText="width:100%;background:"+C.panel2+";border:1px solid "+C.line+";border-radius:10px;padding:10px;color:"+C.ink+";font-size:14px;";
+        list.forEach(function(b){
+          var o=document.createElement("option");o.value=b.id;
+          var when=b.created_at?new Date(b.created_at).toLocaleString("en-GB",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}):"";
+          o.textContent=when+(b.label?"  \u00b7  "+b.label:"");
+          sel.appendChild(o);
+        });
+        var rb=document.createElement("button");rb.className="btn btn-ghost";rb.style.cssText="margin-top:8px;padding:9px 14px;font-size:13px;";rb.textContent="Restore this one";
+        rb.onclick=async function(){
+          rb.textContent="Fetching\u2026";
+          var j=await cloudFetch(sel.value);
+          rb.textContent="Restore this one";
+          if(!j){ msg.style.color=C.amber; msg.textContent="Couldn't fetch that snapshot."; return; }
+          var s2=backupSummary(j);
+          var ok=confirm("Restore the backup from "+s2.made+"?\n\nIt contains:\n\u2022 "+(s2.contents.join("\n\u2022 ")||"nothing recognisable")+
+            "\n\nThis REPLACES what's on this device. Anything logged since that snapshot will be lost.");
+          if(!ok) return;
+          var r=restoreEverything(j);
+          msg.style.color=r.ok?C.glow:C.amber; msg.textContent=r.msg;
+          if(r.ok) setTimeout(function(){ render(true); },900);
+        };
+        picker.appendChild(sel);picker.appendChild(rb);
+      };
+      row.appendChild(bUp);row.appendChild(bDn);
+      card.appendChild(row);card.appendChild(picker);card.appendChild(msg);
+
+      var so=document.createElement("button");so.className="btn btn-ghost";
+      so.style.cssText="margin-top:10px;padding:7px 12px;font-size:12px;color:"+C.muted+";";
+      so.textContent="Sign out";
+      so.onclick=async function(){ await cloudSignOut(); render(false); };
+      card.appendChild(so);
+    });
+
+    container.appendChild(card);
   }
 
   // ---------- app render ----------
@@ -4027,6 +4275,30 @@
 
     var body=document.createElement("div");app.appendChild(body);
 
+    // Backup nag: newest backup of any kind older than NAG_DAYS (or none at all).
+    (function(){
+      var age=backupAgeDays();
+      if(age!==null && age<=NAG_DAYS) return;
+      var nb=document.createElement("div");
+      nb.style.cssText="background:"+C.amber+"14;border:1px solid "+C.amber+"55;border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12.5px;line-height:1.5;color:"+C.ink+";";
+      nb.innerHTML="<b style='color:"+C.amber+"'>Back up your data.</b><br>"+
+        (age===null?"Nothing has been backed up from this device yet."
+                  :"Your last backup was "+age+" days ago.")+
+        " Everything lives on this phone \u2014 clearing Safari's website data would wipe it. Today tab \u2192 Cloud backup.";
+      body.appendChild(nb);
+    })();
+
+    // If any write has failed this session, say so loudly on every tab.
+    if(STORAGE_ERR){
+      var sw=document.createElement("div");
+      sw.style.cssText="background:"+C.red+"1A;border:1px solid "+C.red+"66;border-radius:12px;padding:11px 13px;margin-bottom:12px;font-size:12.5px;line-height:1.5;color:"+C.ink+";";
+      var rp=storageReport();
+      sw.innerHTML="<b style='color:"+C.red+"'>\u26a0\ufe0f This device is refusing to save.</b><br>"+
+        "Writes are failing ("+STORAGE_ERR.name+"). Anything you enter may be lost. "+
+        "Storage in use: <b>"+kb(rp.total)+"</b>. Back up everything from the Today tab, then clear space.";
+      body.appendChild(sw);
+    }
+
     // date-range filter — applies to the data/chart tabs (not Today or Training)
     var rangeTabs={trends:1,compare:1,oura:1,sleep:1,insights:1,history:1,hp360:1};
     var fmodel=model;
@@ -4116,8 +4388,8 @@
           '<defs><filter id="ringglow"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>'+
           '<circle cx="132" cy="132" r="112" fill="none" stroke="#0E2A34" stroke-width="9"/>'+
           '<circle cx="132" cy="132" r="112" fill="none" stroke="'+bc+'" stroke-width="9" stroke-linecap="round" stroke-dasharray="704" stroke-dashoffset="'+(704*(1-today.score100/100)).toFixed(0)+'" filter="url(#ringglow)"/>'+
-        '</svg><div class="r-center"><div class="r-big" style="color:'+bc+'">'+today.score100+'</div><div class="r-st" style="color:'+bc+'">'+VERD[today.band].w+'</div></div></div>'+
-        '<div class="r-act"><span class="r-pill" style="background:'+bc+';box-shadow:0 8px 30px '+bc+'40">'+(tournOn?"\ud83c\udfcc\ufe0f ":today.band==="green"?"\u25b2 ":today.band==="red"?"\u25bc ":"")+VERD[today.band].h+(tournOn?" today":"")+'</span></div>'+
+        '</svg><div class="r-center"><div class="r-big" style="color:'+bc+'">'+today.score100+'</div><div class="r-st" style="color:'+bc+'">'+VERD[today.band].h+'</div></div></div>'+
+        '<div class="r-act"><span class="r-pill" style="background:'+bc+';box-shadow:0 8px 30px '+bc+'40">'+(tournOn?"\ud83c\udfcc\ufe0f ":today.band==="green"?"\u25b2 ":today.band==="red"?"\u25bc ":"")+VERD[today.band].h+" today"+'</span></div>'+
         (trendLine?'<div class="r-trend">'+trendBits.join("  \u00b7  ")+'</div>':'')+
         (travelOn?'<div class="r-travel">\u2708\ufe0f '+(travelMode==="long"?"Long-haul flight yesterday \u2014 bear in mind when reading today\u2019s numbers.":"Short-haul flight yesterday \u2014 context for today\u2019s numbers.")+'</div>':'')+
         '<div class="r-verdict">'+bodyText+'</div>'+
@@ -4226,6 +4498,13 @@
         var b1=document.createElement("button");b1.className="btn btn-primary";b1.textContent="Update 360HP CSV";b1.onclick=function(){fileInput.click();};
         btns.appendChild(b1);
       }
+      var srep=storageReport();
+      var sline=document.createElement("div");
+      sline.style.cssText="font-size:11.5px;color:"+(srep.total>4194304?C.red:srep.total>3145728?C.amber:C.muted)+";margin:2px 2px 10px;line-height:1.5;";
+      sline.textContent="Device storage in use: "+kb(srep.total)+
+        (srep.items[0]?("  \u00b7  biggest: "+srep.items[0].k+" "+kb(srep.items[0].b)):"")+
+        (srep.total>3145728?"  \u2014 getting close to Safari's ~5 MB limit.":"");
+      body.appendChild(sline);
       var bx=document.createElement("button");bx.className="btn btn-ghost";bx.textContent="Export data";bx.onclick=function(){exportMyData(model);};
       btns.appendChild(bx);
       var bimg=document.createElement("button");bimg.className="btn btn-ghost";bimg.textContent="Export image";bimg.onclick=function(){ exportTodayImage(today, bimg); };
@@ -4267,6 +4546,8 @@
         var xnote=document.createElement("div");xnote.className="cnote";xnote.style.cssText="text-align:center;margin-top:6px;color:"+C.muted+";line-height:1.5;";
         xnote.innerHTML="<b>Export image</b> saves today\u2019s summary as a picture to share. <b>Export data</b> is a CSV of your scores. <b>Back up everything</b> saves one dated file with all your data \u2014 keep a few for versioned history. <b>Restore backup</b> puts one of those files back onto this device.";
         body.appendChild(xnote);
+
+        buildCloudCard(body, model);
 
         // ---- Score locks: the permanent morning record ----
         var lkCard=document.createElement("div");lkCard.className="card";lkCard.style.marginTop="14px";
@@ -4377,6 +4658,8 @@
     else if(TAB==="gymtrends") buildGymTrends(body);
     else if(TAB==="hp360") buildHP360(body,fmodel);
     else if(TAB==="insights") buildInsights(body,fmodel);
+
+    cloudAutoPush(fmodel);   // once a day, in the background, only if signed in
 
     var foot=document.createElement("div");foot.className="foot";
     foot.textContent="Signal, not diagnosis. This fuses trends across your own data to suggest how hard to go \u2014 it doesn't replace how you actually feel or medical advice. When your two sources disagree, it tells you and leans cautious.";
