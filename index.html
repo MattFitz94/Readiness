@@ -168,10 +168,13 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
   var GYM_URL="https://script.google.com/macros/s/AKfycbyIgdhH7JNT5N915Lj1UTbetvNieTz6JdcXV8vDygxwCY4hr5txxN7YDrxynEnzl-xp/exec";
 
-  var APP_VERSION="v16.2";
-  var APP_VERSION_NAME="timezone fix + cloud backup";
-  var APP_VERSION_DATE="30 Jul 2026";
+  var APP_VERSION="v17.1";
+  var APP_VERSION_NAME="unlimited storage + engine v3";
+  var APP_VERSION_DATE="2 Aug 2026";
   var APP_CHANGELOG=[
+    ["v17.1","2 Aug 2026","Scoring engine v3, built and checked against your own five years of data. Your self-rating is now judged against your own normal instead of an absolute 1-10 anchor \u2014 you never rate below 6.5, so the old scale turned 30% of the score into a near-constant nudge and squashed everything toward the middle. 360HP\u2019s \u2018filtered\u2019 column is now respected: artifact-corrected nights read a median 46% higher than clean ones, so on those nights the ring\u2019s reading is used instead. HRV is now a 2-day weighted average rather than a single night. And the action word can no longer flip Recover\u2194Push overnight."],
+    ["v17.0","2 Aug 2026","Storage is no longer something you have to think about. Your history (Oura, 360HP, gym) moved out of localStorage \u2014 which Safari caps at about 5 MB \u2014 and into IndexedDB, where the limit is your phone\u2019s free disk space. Oura now syncs only the days it doesn\u2019t already have instead of re-downloading five years every time, and trims each record to the fields the app actually uses. The storage meter, the amber and red warnings and the Compact button are gone because there is nothing left to manage."],
+    ["v16.2","30 Jul 2026","Timezone fix and cloud backup."],
     ["v15.1","30 Jul 2026","Scores lock permanently per date and never drift. Physio tab with your own body log — niggles, soreness, injury, illness, headaches, backdatable. Full backup restore. Stale-data warnings. Sleep score and sleep stages get rolling averages; restlessness reads the right way round. Chart pop-ups can be dismissed."],
     ["v14","earlier","Sleep tab: duration, stages, efficiency, restlessness, sleep \u2192 next-day HRV."],
     ["v13","earlier","Training + gym trends, velocity tracking, team sync."]
@@ -575,11 +578,121 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     }catch(e){ return {ok:false,msg:e.message||"sync failed"}; }
   }
 
-  function get(k){try{return localStorage.getItem(k);}catch(e){return null;}}
-  // A failed localStorage write used to be swallowed here, so the UI said "saved"
-  // and nothing persisted. Now it records the failure so the app can shout about it.
+  // ============================================================================
+  //  STORAGE — two tiers, one interface.
+  //
+  //  localStorage keeps only small state (flags, travel, drafts, prefs): a few KB,
+  //  so it can never approach Safari's ~5 MB wall again.
+  //
+  //  The bulk time-series (Oura history, 360HP rows, gym programme, gym log
+  //  history) live in IndexedDB, whose quota on iOS is disk-based — gigabytes,
+  //  not megabytes. Those four keys are hydrated into memory once at boot, so
+  //  every existing synchronous get/set call site keeps working untouched; the
+  //  write to IndexedDB happens in the background.
+  // ============================================================================
+  var BULK_KEYS = { "readiness_oura_cache_v1":1, "readiness_360hp_rows_v1":1,
+                    "readiness_loghist_v1":1,    "readiness_gym_cache_v1":1 };
+  var MEM = {};                 // in-memory mirror of the bulk keys (raw strings)
+  var IDB = null;               // open IDBDatabase, or null if unavailable
+  var IDB_FAILED = false;
+  var IDB_STORE = "kv";
+
+  function idbOpen(){
+    return new Promise(function(resolve){
+      try{
+        if(!window.indexedDB){ resolve(null); return; }
+        var req = indexedDB.open("readiness", 1);
+        req.onupgradeneeded = function(){
+          var db = req.result;
+          if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+        };
+        req.onsuccess = function(){ resolve(req.result); };
+        req.onerror   = function(){ resolve(null); };
+        req.onblocked = function(){ resolve(null); };
+        setTimeout(function(){ resolve(req.readyState==="done" ? req.result : null); }, 4000);
+      }catch(e){ resolve(null); }
+    });
+  }
+  function idbAll(){
+    return new Promise(function(resolve){
+      if(!IDB){ resolve({}); return; }
+      try{
+        var out={}, tx=IDB.transaction(IDB_STORE,"readonly"), st=tx.objectStore(IDB_STORE);
+        var cur=st.openCursor();
+        cur.onsuccess=function(){
+          var c=cur.result;
+          if(c){ out[c.key]=c.value; c.continue(); } else { resolve(out); }
+        };
+        cur.onerror=function(){ resolve(out); };
+      }catch(e){ resolve({}); }
+    });
+  }
+  function idbPut(k,v){
+    return new Promise(function(resolve){
+      if(!IDB){ resolve(false); return; }
+      try{
+        var tx=IDB.transaction(IDB_STORE,"readwrite");
+        tx.objectStore(IDB_STORE).put(v,k);
+        tx.oncomplete=function(){ resolve(true); };
+        tx.onerror=function(){ IDB_FAILED=true; resolve(false); };
+        tx.onabort=function(){ IDB_FAILED=true; resolve(false); };
+      }catch(e){ IDB_FAILED=true; resolve(false); }
+    });
+  }
+  // Pull the bulk keys into memory. On first run after this upgrade they still
+  // live in localStorage — copy them across, then delete the originals so the
+  // 5 MB budget is freed for good. Runs once, before the first paint.
+  function hydrateBulk(){
+    IDB = null;
+    return idbOpen().then(function(db){
+      IDB = db;
+      return idbAll();
+    }).then(function(stored){
+      var migrated=[];
+      Object.keys(BULK_KEYS).forEach(function(k){
+        var fromIdb = stored[k];
+        var fromLs  = null;
+        try{ fromLs = localStorage.getItem(k); }catch(e){}
+        if(fromIdb!=null && fromIdb!==""){
+          MEM[k]=fromIdb;
+          if(fromLs!=null){ try{ localStorage.removeItem(k); }catch(e){} }   // stale duplicate
+        } else if(fromLs!=null && fromLs!==""){
+          MEM[k]=fromLs;
+          migrated.push(k);
+        }
+      });
+      if(!migrated.length) return true;
+      // write everything we lifted out of localStorage into IndexedDB FIRST,
+      // and only remove the localStorage copy once the write is confirmed.
+      return Promise.all(migrated.map(function(k){
+        return idbPut(k,MEM[k]).then(function(ok){
+          if(ok){ try{ localStorage.removeItem(k); }catch(e){} }
+          return ok;
+        });
+      })).then(function(){ return true; });
+    }).catch(function(){ return true; });   // never let storage setup block the app
+  }
+
+  function get(k){
+    if(BULK_KEYS[k]) return (MEM[k]!=null?MEM[k]:null);
+    try{return localStorage.getItem(k);}catch(e){return null;}
+  }
+  // A failed write used to be swallowed here, so the UI said "saved" and nothing
+  // persisted. It still records the failure so the app can shout about it — but
+  // for the bulk keys the memory write always succeeds, so the UI stays truthful
+  // for the session even if the disk write is slow or the tab is backgrounded.
   var STORAGE_ERR=null;
   function set(k,v){
+    if(BULK_KEYS[k]){
+      MEM[k]=v;
+      idbPut(k,v).then(function(ok){
+        if(!ok){
+          STORAGE_ERR={ key:k, name:"IDBError", msg:"IndexedDB refused the write" };
+          try{ console.error("IndexedDB write FAILED for "+k); }catch(_){}
+        }
+      });
+      return true;
+    }
     try{ localStorage.setItem(k,v); return true; }
     catch(e){
       STORAGE_ERR={ key:k, name:(e&&e.name)||"StorageError", msg:(e&&e.message)||"" };
@@ -587,9 +700,10 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       return false;
     }
   }
-  // Rough bytes used by this origin, and the biggest offenders.
+  // Bytes used, split by tier. localStorage is the one with a hard ceiling, so
+  // that's the number that matters; the IndexedDB figure is informational.
   function storageReport(){
-    var items=[], total=0;
+    var items=[], total=0, bulk=0;
     try{
       for(var i=0;i<localStorage.length;i++){
         var k=localStorage.key(i); var v=localStorage.getItem(k)||"";
@@ -597,11 +711,12 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         total+=b; items.push({k:k,b:b});
       }
     }catch(e){}
+    Object.keys(MEM).forEach(function(k){ bulk += ((k.length+(MEM[k]||"").length)*2); });
     items.sort(function(a,b){return b.b-a.b;});
-    return { total:total, items:items };
+    return { total:total, items:items, bulk:bulk, idb:!!IDB };
   }
   function kb(b){ return b>=1048576?(b/1048576).toFixed(2)+" MB":Math.round(b/1024)+" KB"; }
-  function getJSON(k,f){try{var s=localStorage.getItem(k);return s?JSON.parse(s):f;}catch(e){return f;}}
+  function getJSON(k,f){try{var s=get(k);return s?JSON.parse(s):f;}catch(e){return f;}}
   function setJSON(k,v){ return set(k,JSON.stringify(v)); }
 
   // ---------- helpers ----------
@@ -659,7 +774,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     return o;
   }
   function compactOura(){
-    var raw=localStorage.getItem(K_OURA);
+    var raw=get(K_OURA);   // no longer surfaced in the UI; trimming happens on ingest now
     if(!raw) return {ok:false,msg:"No Oura cache on this device."};
     var before=raw.length*2;
     var o; try{ o=JSON.parse(raw); }catch(e){ return {ok:false,msg:"Couldn't read the Oura cache."}; }
@@ -696,6 +811,9 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         var iso=isoDate(pDate(r.date));
         days[iso]=days[iso]||{iso:iso};
         days[iso].hp_hrv=parseFloat(r.rMSSD);
+        // 360HP's 'filtered' column counts beats it had to correct. Corrected beats
+        // inflate rMSSD, so a high count means the reading reads better than you are.
+        days[iso].hp_filtered=(r.filtered!=null&&r.filtered!=="")?parseInt(r.filtered,10):0;
         days[iso].hp_rhr=r.RHR?parseFloat(r.RHR):null;
         days[iso].hp_subjective=r.subjective?parseFloat(r.subjective):null;
         days[iso].hp_objective=r.objective?parseFloat(r.objective):null;
@@ -779,7 +897,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   //  confidence-not-score for device disagreement, thin-data guards). Self-contained.
   // ============================================================================
   var RV2 = (function(){
-  const ENGINE_VERSION = 2;
+  const ENGINE_VERSION = 3;
 
   const CONFIG = {
     weights: {
@@ -801,6 +919,12 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     saturationZ:        1.5,
     saturationRHR:       50,
     rhrCouplingAmp:     1.30,
+    subjectiveAbsWeight:  0.20,
+    subjectiveRedZ:      -2.0,
+    subjectiveAmberZ:    -1.2,
+    hrvSmoothing:         0.40,
+    bandBuffer:              3,
+    artifactThreshold:       2,
     subjectiveRedFloor:   5.0,
     subjectiveAmberFloor: 6.5,
     deepSuppressionZ:    -2.0,
@@ -970,11 +1094,16 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       return { available: false, score: 0, z: null, note: 'No subjective rating today' };
     }
     const base = buildBaseline(priorDays(hist, today.date, CONFIG.dispersionDays), 'hp_subjective');
+    // Athletes use a narrow personal slice of a 1-10 scale (Saw 2016; Hooper & Mackinnon),
+    // so an absolute anchor at 6.5 becomes a near-constant offset for anyone whose own floor
+    // IS 6.5 - which flattens the whole score. Judge it against his own normal, exactly as
+    // HRV and resting HR already are, keeping a light absolute term as a backstop.
     const absScore = clamp((v - 6.5) / 3.0, -1, 1);
     let relScore = null;
     const z = base.valid ? zScore(v, base) : null;
     if (isNum(z)) relScore = squash(z);
-    const score = isNum(relScore) ? (0.55 * absScore + 0.45 * relScore) : absScore;
+    const W_ABS = CONFIG.subjectiveAbsWeight;
+    const score = isNum(relScore) ? (W_ABS * absScore + (1 - W_ABS) * relScore) : absScore;
     return { available: true, score: clamp(score, -1, 1), z, note: `You rated yourself ${v}/10` };
   }
 
@@ -1091,7 +1220,14 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         message: `Body temperature ${today.o_temp_dev.toFixed(1)}C above your normal` });
     }
     if (isNum(today.hp_subjective)) {
-      if (today.hp_subjective <= CONFIG.subjectiveRedFloor) {
+      const sZ = comps.subjective ? comps.subjective.z : null;
+      if (isNum(sZ) && sZ <= CONFIG.subjectiveRedZ) {
+        flags.push({ type: 'subjective', cap: 'red',
+          message: 'Subjective rating far below your own normal' });
+      } else if (isNum(sZ) && sZ <= CONFIG.subjectiveAmberZ) {
+        flags.push({ type: 'subjective', cap: 'amber',
+          message: 'Subjective rating below your own normal' });
+      } else if (!isNum(sZ) && today.hp_subjective <= CONFIG.subjectiveRedFloor) {
         flags.push({ type: 'subjective', cap: 'red',
           message: 'You rated yourself low enough that nothing else overrides it' });
       } else if (today.hp_subjective <= CONFIG.subjectiveAmberFloor) {
@@ -1305,12 +1441,47 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     return { compute: computeReadiness, recompute: recomputeAll, CONFIG: CONFIG, VERSION: ENGINE_VERSION };
   })();
 
+  // ---- HRV conditioning, applied BEFORE the engine sees a day ----------------
+  // Two problems with a single night's raw HRV, both measured on Matt's own data:
+  //   1. 360HP's 'filtered' column counts corrected beats, and corrected beats inflate
+  //      rMSSD. His artifact-flagged nights read a median 46% higher than his clean ones,
+  //      which the engine would otherwise read as excellent recovery. On those nights the
+  //      ring measured the same sleep, so we swap the source rather than lose the day.
+  //   2. Single-night HRV is noisy: his strap moves a median 23% night to night and its
+  //      coefficient of variation is 39%, well above the 15-25% typical of trained
+  //      athletes. Plews' work recommends multi-day averaging of ln rMSSD rather than
+  //      trusting one reading. A 2-day exponentially weighted geometric mean keeps the
+  //      day-to-day responsiveness while dropping most of the noise.
+  // Verified by convergent validity: strap-vs-ring agreement rises from r=0.40 to r=0.71.
+  function conditionHRV(rows){
+    var W = RV2.CONFIG.hrvSmoothing, TH = RV2.CONFIG.artifactThreshold;
+    var lastHp=null, lastO=null, lastIso=null;
+    return rows.map(function(row){
+      var hpv = (row.hp_hrv!=null?row.hp_hrv:null);
+      var ohv = (row.o_hrv!=null?row.o_hrv:null);
+      var swapped=false;
+      if(hpv!=null && (row.hp_filtered||0)>=TH && ohv!=null){ hpv=null; swapped=true; }
+      var consec = lastIso && Math.round((dLocal(row.iso)-dLocal(lastIso))/86400000)===1;
+      if(W>0 && consec){
+        if(hpv!=null && lastHp!=null) hpv=Math.exp(Math.log(hpv)*(1-W)+Math.log(lastHp)*W);
+        if(ohv!=null && lastO!=null)  ohv=Math.exp(Math.log(ohv)*(1-W)+Math.log(lastO)*W);
+      }
+      if(hpv!=null) lastHp=hpv;
+      if(ohv!=null) lastO=ohv;
+      lastIso=row.iso;
+      return { hp_hrv:hpv, o_hrv:ohv, swapped:swapped };
+    });
+  }
+  var _cond=null;   // parallel array to the model, filled by analyze()
+  var _hystBand=null;
+
   // Map an app day-row (from fuse) to the engine's expected input shape.
-  function toEngineDay(row){
+  function toEngineDay(row, i){
+    var c = (_cond && _cond[i]) ? _cond[i] : null;
     return {
       date: row.iso,
-      hp_hrv: (row.hp_hrv!=null?row.hp_hrv:null),
-      o_hrv:  (row.o_hrv!=null?row.o_hrv:null),
+      hp_hrv: c ? c.hp_hrv : (row.hp_hrv!=null?row.hp_hrv:null),
+      o_hrv:  c ? c.o_hrv  : (row.o_hrv!=null?row.o_hrv:null),
       hp_rhr: (row.hp_rhr!=null?row.hp_rhr:null),
       o_rhr:  (row.o_rhr!=null?row.o_rhr:null),
       hp_subjective: (row.hp_subjective!=null?row.hp_subjective:null),
@@ -1326,6 +1497,8 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
 
   // v2-powered analyze: keeps the exact output contract the UI already consumes.
   function analyze(arr){
+    _cond = conditionHRV(arr);
+    _hystBand = null;                          // hysteresis walks forward through history
     var engineDays = arr.map(toEngineDay);
     var _lockStore = isViewer()? null : getLocks();  // PERF: read once, not once per row
     var _lockToday = isoToday();
@@ -1456,8 +1629,27 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       reasons = flagLines.concat(reasons);
       if(!reasons.length) reasons.push({dir:"flat", txt:"Not enough data yet today to explain \u2014 add more history."});
 
-      // band -> keep the app's yellow naming
-      var band = res.band==="amber" ? "yellow" : res.band;
+      // Band hysteresis. A score sitting a point either side of a boundary was flipping
+      // Recover/Moderate/Push overnight on noise alone - 45% of consecutive days changed
+      // band. Requiring the score to clear the edge by a few points before the band is
+      // allowed to move cuts that to ~30% without touching the number itself. The score
+      // shown is unchanged; only the word attached to it is steadied.
+      var _rawBand = res.band==="amber" ? "yellow" : res.band;
+      var band = _rawBand;
+      if(res.score!=null){
+        var BUF=RV2.CONFIG.bandBuffer, ORD=["red","yellow","green"];
+        var prevBand=_hystBand;
+        if(prevBand && prevBand!==_rawBand){
+          var up = ORD.indexOf(_rawBand) > ORD.indexOf(prevBand);
+          var edge = up ? (_rawBand==="green"?59:39) : (prevBand==="green"?59:39);
+          var clear = up ? (res.score >= edge+BUF) : (res.score <= edge-BUF);
+          if(!clear) band = prevBand;
+          // Never skip a band overnight. Recover -> Push in a single day is a measurement
+          // artefact, not a physiological state change; step through Moderate instead.
+          if(Math.abs(ORD.indexOf(band)-ORD.indexOf(prevBand))===2) band="yellow";
+        }
+        _hystBand = band;
+      }
       var score100 = res.score!=null ? res.score : 0;
 
       // FREEZE the score. Once a date has a lock, that IS the score for that date, for ever.
@@ -1541,15 +1733,68 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   }
 
   // ---------- Oura fetch ----------
+  // INCREMENTAL. The relay defaults to pulling everything since 2021, which is
+  // ~1.6 MB of JSON on every single sync — that was the real cause of the storage
+  // squeeze, not localStorage itself. Once we hold history locally we ask only for
+  // the last few days and merge. The 10-day overlap covers Oura's habit of
+  // back-filling a night hours after it ends.
+  var OURA_OVERLAP_DAYS = 10;
+
+  function ouraLatestDay(cache){
+    var last=null;
+    function seen(d){ if(d && (!last || d>last)) last=d; }
+    (cache.readiness||[]).forEach(function(r){ seen(r.day); });
+    (cache.daily_sleep||[]).forEach(function(r){ seen(r.day); });
+    Object.keys(cache.sleep_detail||{}).forEach(seen);
+    return last;
+  }
+  // Keep only the fields the app actually reads. The raw records carry thirty-plus
+  // each; trimming on the way IN means the cache can never bloat in the first place.
+  function trimOura(d){
+    return {
+      readiness:(d.readiness||[]).map(function(r){
+        var x=pick(r,OURA_KEEP_READY);
+        if(r.contributors) x.contributors=pick(r.contributors,["hrv_balance","resting_heart_rate"]);
+        return x;
+      }),
+      daily_sleep:(d.daily_sleep||[]).map(function(r){ return pick(r,OURA_KEEP_SLEEP); }),
+      sleep_detail:(function(){
+        var out={}, det=d.sleep_detail||{};
+        Object.keys(det).forEach(function(day){ out[day]=pick(det[day],OURA_KEEP_DETAIL); });
+        return out;
+      })()
+    };
+  }
+  // Merge fresh days over the top of what we already hold, keyed by day.
+  function mergeOura(old, fresh){
+    function byDay(arr){ var m={}; (arr||[]).forEach(function(r){ if(r&&r.day) m[r.day]=r; }); return m; }
+    var R=byDay(old.readiness),   S=byDay(old.daily_sleep);
+    var fR=byDay(fresh.readiness),fS=byDay(fresh.daily_sleep);
+    Object.keys(fR).forEach(function(k){ R[k]=fR[k]; });
+    Object.keys(fS).forEach(function(k){ S[k]=fS[k]; });
+    var D=Object.assign({}, old.sleep_detail||{}, fresh.sleep_detail||{});
+    function sorted(m){ return Object.keys(m).sort().map(function(k){ return m[k]; }); }
+    return { readiness:sorted(R), daily_sleep:sorted(S), sleep_detail:D };
+  }
+
   function fetchOura(cb){
     if(!WORKER_URL || WORKER_URL.indexOf("http")!==0){ cb({error:"No relay URL set"}); return; }
-    var ctrl=new AbortController(); var to=setTimeout(function(){ctrl.abort();},12000);
-    fetch(WORKER_URL,{signal:ctrl.signal}).then(function(r){return r.json();}).then(function(d){
+    var cache=getJSON(K_OURA,null);
+    var have=cache?ouraLatestDay(cache):null;
+    var url=WORKER_URL;
+    if(have){
+      var from=isoShift(have,-OURA_OVERLAP_DAYS);
+      url += (WORKER_URL.indexOf("?")>-1?"&":"?") + "start=" + from;
+    }
+    var ctrl=new AbortController(); var to=setTimeout(function(){ctrl.abort();},20000);
+    fetch(url,{signal:ctrl.signal}).then(function(r){return r.json();}).then(function(d){
       clearTimeout(to);
       if(d.error){ cb({error:d.error}); return; }
-      setJSON(K_OURA,{readiness:d.readiness||[],daily_sleep:d.daily_sleep||[],sleep_detail:d.sleep_detail||{}});
+      var fresh=trimOura(d);
+      var next=(cache && have) ? mergeOura(cache,fresh) : fresh;
+      setJSON(K_OURA,next);
       set(K_OURATIME,String(Date.now()));
-      cb({ok:true});
+      cb({ok:true, incremental:!!have});
     }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out reaching Oura":e.message}); });
   }
 
@@ -4386,7 +4631,8 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       var rp=storageReport();
       sw.innerHTML="<b style='color:"+C.red+"'>\u26a0\ufe0f This device is refusing to save.</b><br>"+
         "Writes are failing ("+STORAGE_ERR.name+"). Anything you enter may be lost. "+
-        "Storage in use: <b>"+kb(rp.total)+"</b>. Back up everything from the Today tab, then clear space.";
+        "This is not a space problem \u2014 it usually means Private Browsing, or Safari blocking site data. "+
+        "Back up from the Today tab, then reopen the app from your Home Screen.";
       body.appendChild(sw);
     }
 
@@ -4589,36 +4835,22 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         var b1=document.createElement("button");b1.className="btn btn-primary";b1.textContent="Update 360HP CSV";b1.onclick=function(){fileInput.click();};
         btns.appendChild(b1);
       }
+      // Storage readout — informational only now. History lives in IndexedDB, whose
+      // quota on iOS is disk-based rather than the ~5 MB localStorage wall, so there
+      // is nothing here to act on and no warning colours.
       var srep=storageReport();
       var sline=document.createElement("div");
-      sline.style.cssText="font-size:11.5px;color:"+(srep.total>4194304?C.red:srep.total>3145728?C.amber:C.muted)+";margin:2px 2px 10px;line-height:1.5;";
-      sline.textContent="Device storage in use: "+kb(srep.total)+
-        (srep.items[0]?("  \u00b7  biggest: "+srep.items[0].k+" "+kb(srep.items[0].b)):"")+
-        (srep.total>3145728?"  \u2014 getting close to Safari's ~5 MB limit.":"");
+      sline.style.cssText="font-size:11.5px;color:"+C.muted+";margin:2px 2px 10px;line-height:1.5;";
+      sline.textContent = srep.idb
+        ? ("History "+kb(srep.bulk)+" in IndexedDB \u00b7 settings "+kb(srep.total)+" \u2014 no limit to worry about.")
+        : ("Storage in use: "+kb(srep.total)+" \u2014 IndexedDB unavailable on this browser, using fallback.");
       body.appendChild(sline);
-      if(srep.total>2097152){
-        var cbtn=document.createElement("button");cbtn.className="btn btn-ghost";
-        cbtn.style.cssText="padding:8px 13px;font-size:12.5px;margin:0 2px 10px;";
-        cbtn.textContent="Compact Oura cache";
-        var cmsg=document.createElement("div");cmsg.style.cssText="font-size:11.5px;color:"+C.muted+";margin:0 2px 10px;line-height:1.5;";
-        cbtn.onclick=function(){
-          if(!confirm("Trim the Oura cache down to the fields this app actually uses?\n\nNothing you can see in the app changes. Anything removed re-downloads on the next Oura sync.\n\nBack up first if you haven't.")) return;
-          cbtn.textContent="Compacting\u2026";
-          var r=compactOura();
-          cbtn.textContent="Compact Oura cache";
-          if(!r.ok){ cmsg.style.color=C.amber; cmsg.textContent=r.msg; return; }
-          cmsg.style.color=C.glow;
-          cmsg.textContent=r.saved?("Freed "+kb(r.saved)+" \u2014 Oura cache now "+kb(r.after)+"."):(r.msg||"Already compact.");
-          setTimeout(function(){ render(false); },1200);
-        };
-        body.appendChild(cbtn);body.appendChild(cmsg);
-      }
       var bx=document.createElement("button");bx.className="btn btn-ghost";bx.textContent="Export data";bx.onclick=function(){exportMyData(model);};
       btns.appendChild(bx);
       var bimg=document.createElement("button");bimg.className="btn btn-ghost";bimg.textContent="Export image";bimg.onclick=function(){ exportTodayImage(today, bimg); };
       btns.appendChild(bimg);
       if(canEditOwn()){
-        var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){localStorage.removeItem(K_ROWS);localStorage.removeItem(K_OURA);localStorage.removeItem(K_OURATIME);render(false);}};
+        var b2=document.createElement("button");b2.className="btn btn-ghost";b2.textContent="Clear all data";b2.onclick=function(){if(confirm("Clear 360HP history and Oura cache from this device?")){set(K_ROWS,"");set(K_OURA,"");delete MEM[K_ROWS];delete MEM[K_OURA];localStorage.removeItem(K_OURATIME);render(false);}};
         btns.appendChild(b2);
       }
       body.appendChild(btns);
@@ -4781,7 +5013,12 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     PREVTAB=TAB;
   }
 
+  // Load the bulk keys out of IndexedDB into memory BEFORE anything renders, so
+  // every synchronous read below sees the full history exactly as it used to.
+  hydrateBulk().then(function(){ startApp(); });
+
   // initial render, then auto-sync Oura once on load if we have a URL
+  function startApp(){
   try{
     if(teamConfigured()){
       // Resolve auth BEFORE first paint so signed-in users (owner or viewer) skip the login gate,
@@ -4824,6 +5061,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       }
     }
   }catch(err){ fail("Something went wrong starting the app: "+err.message); }
+  }
 })();
 </script>
 </body>
