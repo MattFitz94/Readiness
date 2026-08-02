@@ -168,10 +168,14 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   var WORKER_URL="https://shiny-wind-c11d.mattfitzpatrick1994.workers.dev/";
   var GYM_URL="https://script.google.com/macros/s/AKfycbyIgdhH7JNT5N915Lj1UTbetvNieTz6JdcXV8vDygxwCY4hr5txxN7YDrxynEnzl-xp/exec";
 
-  var APP_VERSION="v17.1";
-  var APP_VERSION_NAME="unlimited storage + engine v3";
+  var APP_VERSION="v19.1";
+  var APP_VERSION_NAME="Supabase source of truth + sleep time fix";
   var APP_VERSION_DATE="2 Aug 2026";
   var APP_CHANGELOG=[
+    ["v19.1","2 Aug 2026","Sleep time is now correct. The Oura relay rounds sleep hours to one decimal before sending them, which can only land on 6-minute steps \u2014 so 6h 50m arrived as 6.8 and displayed as 6h 48m. Across your history that put 812 of 1624 nights out by more than a minute. The app now reads the raw seconds instead, and shows sleep as h/min to match the Oura app. Also fixes the sleep ring occasionally describing a different night than the rest of the card, and a v19.0 bug where a night without precomputed hours would lose its sleep time on the trip to Supabase."],
+    ["v19.0","2 Aug 2026","Supabase is now the source of truth for everything: 360HP readings, Oura history, body log, scores and locks. Your device keeps a cache, so the app still paints instantly and still works with no signal \u2014 it just reconciles with the cloud a moment later. Any device you sign in on shows the same data. Graph queries are capped at the last 365 days, which is about 17 KB over the wire, so the network is never the slow part."],
+    ["v18.0","2 Aug 2026","Locked scores now live in Supabase, not just on the device you happened to be holding. Your phone and laptop reconcile at startup and show the same number for the same morning, and a device that loses its data pulls every locked score back from the cloud. The table has no update or delete policy, so Postgres itself refuses to change a score once locked \u2014 it is no longer a rule the app promises to keep. The lock store also moved off localStorage, where it had grown to 412 KB and was the last thing still competing for the old 5 MB budget."],
+    ["v17.2","2 Aug 2026","Fixes a false \u201cdid NOT save\u201d warning introduced in v17.0. The CSV import and body log were confirming their writes by reading back from localStorage, but v17.0 moved that data to IndexedDB \u2014 so the read-back found nothing and reported a failure for a save that had actually worked. Both checks now read from wherever the data really lives. No data was ever lost."],
     ["v17.1","2 Aug 2026","Scoring engine v3, built and checked against your own five years of data. Your self-rating is now judged against your own normal instead of an absolute 1-10 anchor \u2014 you never rate below 6.5, so the old scale turned 30% of the score into a near-constant nudge and squashed everything toward the middle. 360HP\u2019s \u2018filtered\u2019 column is now respected: artifact-corrected nights read a median 46% higher than clean ones, so on those nights the ring\u2019s reading is used instead. HRV is now a 2-day weighted average rather than a single night. And the action word can no longer flip Recover\u2194Push overnight."],
     ["v17.0","2 Aug 2026","Storage is no longer something you have to think about. Your history (Oura, 360HP, gym) moved out of localStorage \u2014 which Safari caps at about 5 MB \u2014 and into IndexedDB, where the limit is your phone\u2019s free disk space. Oura now syncs only the days it doesn\u2019t already have instead of re-downloading five years every time, and trims each record to the fields the app actually uses. The storage meter, the amber and red warnings and the Compact button are gone because there is nothing left to manage."],
     ["v16.2","30 Jul 2026","Timezone fix and cloud backup."],
@@ -234,8 +238,84 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
     window.addEventListener("pagehide",flushLocks);
     document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="hidden") flushLocks(); });
   }catch(e){}
-  function setLock(iso,obj){ var l=getLocks(); l[iso]=obj; saveLocksNow(l); return l; }
+  function setLock(iso,obj){ var l=getLocks(); l[iso]=obj; saveLocksNow(l); pushLock(iso,obj); return l; }
   function clearLock(iso){ var l=getLocks(); delete l[iso]; saveLocksNow(l); return l; }
+
+  // ==========================================================================
+  //  LOCKS IN SUPABASE — the score becomes device-independent.
+  //
+  //  Until now a locked score lived only in this browser, so your phone and your
+  //  laptop could show different numbers for the same morning, and clearing site
+  //  data lost the lot. readiness_locks is now the authority: the local copy is a
+  //  cache of it.
+  //
+  //  The table has SELECT and INSERT policies and deliberately NO update or delete
+  //  policy. With row-level security on, an operation with no policy is denied - so
+  //  Postgres itself refuses to change a score that has already been locked. It is
+  //  not a rule the app promises to follow; it is one it cannot break.
+  // ==========================================================================
+  var _LOCKS_SYNCED=false, _LOCK_PUSH_Q={}, _LOCK_PUSH_T=null, _lockSync=null;
+
+  function pushLock(iso,obj){
+    if(!_teamSB || !obj || obj.score==null) return;
+    _LOCK_PUSH_Q[iso]=obj;
+    if(_LOCK_PUSH_T) return;
+    _LOCK_PUSH_T=setTimeout(function(){ _LOCK_PUSH_T=null; flushLockPush(); }, 1500);
+  }
+  async function flushLockPush(){
+    if(!_teamSB) return;
+    var batch=_LOCK_PUSH_Q; _LOCK_PUSH_Q={};
+    var isos=Object.keys(batch); if(!isos.length) return;
+    try{
+      var sess=await _teamSB.auth.getSession();
+      if(!sess.data.session){ return; }              // signed out: keep the local lock, try later
+      var rows=isos.map(function(iso){
+        var o=batch[iso];
+        return { day:iso, score:Math.round(o.score),
+                 band:(o.band==="yellow"?"amber":o.band)||"amber",
+                 action:(o.band==="green"?"Push":o.band==="red"?"Recover":"Moderate"),
+                 confidence:o.confidence||null, engine_version:(RV2&&RV2.VERSION)||3,
+                 inputs:{src:o.src||null, comp:o.comp||null, lockedAt:o.lockedAt||null} };
+      });
+      // A locked day is immutable, so a re-push must be a no-op rather than an overwrite.
+      await _teamSB.from("readiness_locks").upsert(rows,{onConflict:"day",ignoreDuplicates:true});
+    }catch(e){ try{ console.warn("lock push deferred:", e.message); }catch(_){ } }
+  }
+
+  // Boot: Supabase wins for any day it already holds, then anything this device has
+  // and the cloud does not gets pushed up. That reconciliation is what makes two
+  // devices agree.
+  async function syncLocks(){
+    if(!_teamSB || _LOCKS_SYNCED) return {ok:false,msg:"not configured"};
+    try{
+      var sess=await _teamSB.auth.getSession();
+      if(!sess.data.session) return {ok:false,msg:"not signed in"};
+      var r=await _teamSB.from("readiness_locks").select("day,score,band,confidence,inputs");
+      if(r.error) return {ok:false,msg:r.error.message};
+      var local=getLocks(), pulled=0, changed=false;
+      (r.data||[]).forEach(function(row){
+        var cur=local[row.day];
+        if(!cur || cur.score!==row.score){
+          local[row.day]={ score:row.score,
+            band:(row.band==="amber"?"yellow":row.band),
+            confidence:row.confidence||null,
+            comp:(row.inputs&&row.inputs.comp)||null,
+            lockedAt:(row.inputs&&row.inputs.lockedAt)||null,
+            src:(row.inputs&&row.inputs.src)||"cloud" };
+          pulled++; changed=true;
+        }
+      });
+      if(changed) saveLocksNow(local);
+      var have={}; (r.data||[]).forEach(function(x){ have[x.day]=1; });
+      var pushed=0;
+      Object.keys(local).forEach(function(iso){
+        if(!have[iso] && local[iso] && local[iso].score!=null){ _LOCK_PUSH_Q[iso]=local[iso]; pushed++; }
+      });
+      if(pushed) await flushLockPush();
+      _LOCKS_SYNCED=true;
+      return {ok:true, pulled:pulled, pushed:pushed, total:Object.keys(local).length};
+    }catch(e){ return {ok:false,msg:e.message||"lock sync failed"}; }
+  }
   // Today is only locked once the real morning inputs are actually present:
   // the 360HP reading (the CSV) AND something from Oura for that date.
   function morningDataComplete(row){
@@ -364,13 +444,13 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   }
   function saveBodyLog(n){
     var ok=setJSON(K_NIGGLES,n);
+    try{ pushBodyLog(n); }catch(e){}
     // read back — the only honest proof it persisted
-    var back=null; try{ back=JSON.parse(localStorage.getItem(K_NIGGLES)||"null"); }catch(e){}
+    var back=null; try{ back=JSON.parse(get(K_NIGGLES)||"null"); }catch(e){}
     if(!ok || !Array.isArray(back) || back.length!==n.length){
-      var r=storageReport();
       alert("\u26a0\ufe0f Your body log did NOT save.\n\nThis device's storage is refusing writes"+
-            (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\nUsing about "+kb(r.total)+
-            ".\n\nUse \u201cBack up everything\u201d on the Today tab now, then free up space.");
+            (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\n\nThis is not a space problem. It usually means "+
+            "Private Browsing, or Safari blocking site data.\n\nUse \u201cBack up everything\u201d on the Today tab now.");
       return false;
     }
     return true;
@@ -591,7 +671,8 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
   //  write to IndexedDB happens in the background.
   // ============================================================================
   var BULK_KEYS = { "readiness_oura_cache_v1":1, "readiness_360hp_rows_v1":1,
-                    "readiness_loghist_v1":1,    "readiness_gym_cache_v1":1 };
+                    "readiness_loghist_v1":1,    "readiness_gym_cache_v1":1,
+                    "readiness_scorelock_v2":1 };
   var MEM = {};                 // in-memory mirror of the bulk keys (raw strings)
   var IDB = null;               // open IDBDatabase, or null if unavailable
   var IDB_FAILED = false;
@@ -838,10 +919,10 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         // some relays put sleep duration on the daily_sleep record — grab it if present
         if(d.o_sleephrs==null){
           var h=null;
-          if(r.total_sleep_hours!=null) h=r.total_sleep_hours;
-          else if(r.total_sleep_duration!=null) h=r.total_sleep_duration/3600;
+          if(r.total_sleep_duration!=null) h=r.total_sleep_duration/3600;
           else if(r.duration!=null) h=r.duration/3600;
-          if(h!=null && isFinite(h) && h>0) d.o_sleephrs=Math.round(h*10)/10;
+          else if(r.total_sleep_hours!=null) h=r.total_sleep_hours;
+          if(h!=null && isFinite(h) && h>0) d.o_sleephrs=Math.round(h*1000)/1000;
         }
       });
       var det=oura.sleep_detail||{};
@@ -852,12 +933,15 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         // sleep hours: relay may send hours directly, or Oura's raw seconds under various names
         var sd=det[day];
         var hrs=null;
-        if(sd.total_sleep_hours!=null) hrs=sd.total_sleep_hours;
-        else if(sd.total_sleep_duration!=null) hrs=sd.total_sleep_duration/3600;   // Oura: seconds asleep
+        // Seconds before hours: the relay rounds hours to 1dp and loses up to 3 minutes.
+        if(sd.total_sleep_duration!=null) hrs=sd.total_sleep_duration/3600;        // Oura: seconds asleep
         else if(sd.total_sleep_seconds!=null) hrs=sd.total_sleep_seconds/3600;
+        else if(sd.total_sleep_hours!=null) hrs=sd.total_sleep_hours;
         else if(sd.duration!=null) hrs=sd.duration/3600;
         else if(sd.time_in_bed!=null && sd.efficiency!=null) hrs=(sd.time_in_bed*(sd.efficiency/100))/3600;
-        d.o_sleephrs=(hrs!=null && isFinite(hrs) && hrs>0)?Math.round(hrs*10)/10:(d.o_sleephrs!=null?d.o_sleephrs:null);
+        // Keep 2dp, not 1. At 1dp the value can only land on 6-minute steps, which is
+        // what made the displayed time disagree with the Oura app.
+        d.o_sleephrs=(hrs!=null && isFinite(hrs) && hrs>0)?Math.round(hrs*1000)/1000:(d.o_sleephrs!=null?d.o_sleephrs:null);
         // extra sleep-tab fields (v5 relay): stages, restlessness, efficiency, midpoint
         d.o_deep=sd.deep_sleep_hours!=null?sd.deep_sleep_hours:null;
         d.o_rem=sd.rem_sleep_hours!=null?sd.rem_sleep_hours:null;
@@ -1732,6 +1816,165 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       '<div class="r-k">'+label+'</div><div class="r-n">'+sub+'</div></div>';
   }
 
+  // ==========================================================================
+  //  CLOUD — Supabase is the source of truth; the device holds a cache of it.
+  //
+  //  The cache is deliberately kept in the SAME keys fuse() already reads, so
+  //  every chart, every tab and the whole scoring path stay exactly as they are.
+  //  Nothing below this line had to become async. What changes is where the data
+  //  comes from: on boot we paint instantly from cache, then reconcile with
+  //  Supabase and repaint if anything moved.
+  //
+  //  Every query is capped at CLOUD_WINDOW days. Measured on Matt's own data, a
+  //  year of readiness rows is ~6 KB gzipped over the wire - one round trip, and
+  //  the size stops mattering.
+  // ==========================================================================
+  var CLOUD_WINDOW = 365;
+  var cloudStatus = { state:"idle", msg:"", at:null };
+
+  function cloudSince(){ return isoShift(isoToday(), -CLOUD_WINDOW); }
+  async function cloudReady(){
+    if(!_teamSB) return false;
+    try{ var r=await _teamSB.auth.getSession(); return !!r.data.session; }catch(e){ return false; }
+  }
+
+  // ---- push: local change -> Supabase -------------------------------------
+  async function pushHp(rows){
+    if(!await cloudReady() || !rows || !rows.length) return {ok:false};
+    var since=cloudSince();
+    var payload=rows.map(function(r){
+      var d=pDate(r.date); if(isNaN(d)) return null;
+      var iso=isoDate(d); if(iso<since) return null;
+      var num=function(v){ return (v!=null&&v!=="")?parseFloat(v):null; };
+      return { day:iso, rmssd:num(r.rMSSD), rhr:num(r.RHR), subjective:num(r.subjective),
+        objective:num(r.objective), filtered:(r.filtered!=null&&r.filtered!=="")?parseInt(r.filtered,10):0,
+        sleep:num(r.sleep), energy:num(r.energy), diet:num(r.diet), exercise:num(r.exercise),
+        happiness:num(r.happiness), tags:r.tags||null, note:r.note||null,
+        updated_at:new Date().toISOString() };
+    }).filter(Boolean);
+    if(!payload.length) return {ok:true,count:0};
+    var { error } = await _teamSB.from("hp_readings").upsert(payload,{onConflict:"day"});
+    return error?{ok:false,msg:error.message}:{ok:true,count:payload.length};
+  }
+
+  async function pushOura(cache){
+    if(!await cloudReady() || !cache) return {ok:false};
+    var since=cloudSince(), by={};
+    (cache.readiness||[]).forEach(function(r){ if(r.day>=since){ (by[r.day]=by[r.day]||{day:r.day}).readiness_score=r.score??null;
+      by[r.day].temp_deviation=r.temperature_deviation??null; } });
+    (cache.daily_sleep||[]).forEach(function(r){ if(r.day>=since){ (by[r.day]=by[r.day]||{day:r.day}).sleep_score=r.score??null; } });
+    Object.keys(cache.sleep_detail||{}).forEach(function(day){
+      if(day<since) return;
+      var d=cache.sleep_detail[day], o=(by[day]=by[day]||{day:day});
+      o.hrv=d.average_hrv??null; o.avg_hr=d.average_heart_rate??null; o.lowest_hr=d.lowest_heart_rate??null;
+      // Derive hours here rather than pushing null. fuse() has a fallback chain for the
+      // nights Oura sends seconds but not hours; that chain has to run BEFORE the value
+      // goes to Supabase, or the round trip turns a derivable number into a permanent gap.
+      var _h=null;
+      // Raw seconds FIRST. The relay's total_sleep_hours is rounded to one decimal,
+      // so 24600 s (6h 50m) comes back as 6.8 h and displays as 6h 48m. Measured across
+      // the full history, that rounding puts 812 of 1624 nights out by over a minute.
+      if(d.total_sleep_duration!=null) _h=d.total_sleep_duration/3600;
+      else if(d.total_sleep_seconds!=null) _h=d.total_sleep_seconds/3600;
+      else if(d.total_sleep_hours!=null) _h=d.total_sleep_hours;
+      else if(d.duration!=null) _h=d.duration/3600;
+      else if(d.time_in_bed!=null && d.efficiency!=null) _h=(d.time_in_bed*(d.efficiency/100))/3600;
+      o.sleep_hours=(_h!=null&&isFinite(_h)&&_h>0)?Math.round(_h*1000)/1000:null;
+      o.efficiency=d.efficiency??null;
+      o.deep_hours=d.deep_sleep_hours??null; o.rem_hours=d.rem_sleep_hours??null;
+      o.light_hours=d.light_sleep_hours??null; o.restless_pct=d.restless_pct??null;
+      o.bedtime_start=d.bedtime_start||null; o.bedtime_end=d.bedtime_end||null;
+    });
+    var payload=Object.values(by); if(!payload.length) return {ok:true,count:0};
+    payload.forEach(function(r){ r.updated_at=new Date().toISOString(); });
+    var { error } = await _teamSB.from("oura_daily").upsert(payload,{onConflict:"day"});
+    return error?{ok:false,msg:error.message}:{ok:true,count:payload.length};
+  }
+
+  async function pushBodyLog(entries){
+    if(!await cloudReady() || !entries) return {ok:false};
+    var payload=entries.map(function(e){
+      return { id:e.id, entry:e, started:e.started||null, status:e.status||"active",
+               updated_at:new Date().toISOString() };
+    });
+    if(!payload.length) return {ok:true,count:0};
+    var { error } = await _teamSB.from("body_log").upsert(payload,{onConflict:"id"});
+    return error?{ok:false,msg:error.message}:{ok:true,count:payload.length};
+  }
+
+  // ---- pull: Supabase -> local cache --------------------------------------
+  // Rebuilds the same shapes fuse() already consumes, so nothing downstream knows
+  // the data arrived over the network.
+  async function pullAll(){
+    if(!await cloudReady()){ cloudStatus={state:"offline",msg:"not signed in",at:Date.now()}; return {ok:false}; }
+    cloudStatus={state:"loading",msg:"",at:Date.now()};
+    var since=cloudSince(), changed=false;
+    try{
+      var res=await Promise.all([
+        _teamSB.from("hp_readings").select("*").gte("day",since).order("day",{ascending:true}),
+        _teamSB.from("oura_daily").select("*").gte("day",since).order("day",{ascending:true}),
+        _teamSB.from("body_log").select("*").order("started",{ascending:false})
+      ]);
+      var hpR=res[0], ouR=res[1], blR=res[2];
+      var firstErr=(hpR.error||ouR.error||blR.error);
+      if(firstErr){ cloudStatus={state:"error",msg:firstErr.message,at:Date.now()}; return {ok:false,msg:firstErr.message}; }
+
+      // 360HP -> the same row shape parseCSV produces, so fuse() is unchanged.
+      if((hpR.data||[]).length){
+        var rows=hpR.data.map(function(r){
+          var p=r.day.split("-");
+          return { date:p[2]+"-"+p[1]+"-"+p[0], rMSSD:r.rmssd, RHR:r.rhr, subjective:r.subjective,
+            objective:r.objective, filtered:r.filtered, sleep:r.sleep, energy:r.energy, diet:r.diet,
+            exercise:r.exercise, happiness:r.happiness, tags:r.tags||"", note:r.note||"" };
+        });
+        var prev=getJSON(K_ROWS,null);
+        if(JSON.stringify(prev)!==JSON.stringify(rows)){ setJSON(K_ROWS,rows); changed=true; }
+      }
+
+      // Oura -> readiness / daily_sleep / sleep_detail, merged over what we hold so
+      // history older than the window survives on the device.
+      if((ouR.data||[]).length){
+        var fresh={readiness:[],daily_sleep:[],sleep_detail:{}};
+        ouR.data.forEach(function(r){
+          fresh.readiness.push({day:r.day,score:r.readiness_score,temperature_deviation:r.temp_deviation});
+          fresh.daily_sleep.push({day:r.day,score:r.sleep_score});
+          fresh.sleep_detail[r.day]={ average_hrv:r.hrv, average_heart_rate:r.avg_hr, lowest_heart_rate:r.lowest_hr,
+            total_sleep_hours:r.sleep_hours, efficiency:r.efficiency, deep_sleep_hours:r.deep_hours,
+            rem_sleep_hours:r.rem_hours, light_sleep_hours:r.light_hours, restless_pct:r.restless_pct,
+            bedtime_start:r.bedtime_start, bedtime_end:r.bedtime_end };
+        });
+        var oldC=getJSON(K_OURA,null);
+        var next=oldC?mergeOura(oldC,fresh):fresh;
+        if(JSON.stringify(oldC)!==JSON.stringify(next)){ setJSON(K_OURA,next); changed=true; }
+      }
+
+      if((blR.data||[]).length){
+        var bl=blR.data.map(function(r){ return r.entry; }).filter(Boolean);
+        var prevBl=getJSON(K_NIGGLES,null);
+        if(JSON.stringify(prevBl)!==JSON.stringify(bl)){ setJSON(K_NIGGLES,bl); changed=true; }
+      }
+
+      cloudStatus={state:"ok",msg:"",at:Date.now()};
+      set("readiness_cloud_lastpull",String(Date.now()));
+      return {ok:true, changed:changed,
+              counts:{hp:(hpR.data||[]).length, oura:(ouR.data||[]).length, body:(blR.data||[]).length}};
+    }catch(e){
+      cloudStatus={state:"error",msg:e.message||"pull failed",at:Date.now()};
+      return {ok:false,msg:e.message};
+    }
+  }
+
+  // First run after the upgrade: everything on this device goes up, so the cloud
+  // starts out complete rather than empty.
+  async function seedCloud(){
+    if(!await cloudReady()) return {ok:false};
+    var r1=await pushHp(getJSON(K_ROWS,[])||[]);
+    var r2=await pushOura(getJSON(K_OURA,null));
+    var r3=await pushBodyLog(getJSON(K_NIGGLES,[])||[]);
+    set("readiness_cloud_seeded","1");
+    return {ok:true, hp:r1.count||0, oura:r2.count||0, body:r3.count||0};
+  }
+
   // ---------- Oura fetch ----------
   // INCREMENTAL. The relay defaults to pulling everything since 2021, which is
   // ~1.6 MB of JSON on every single sync — that was the real cause of the storage
@@ -1794,6 +2037,7 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       var next=(cache && have) ? mergeOura(cache,fresh) : fresh;
       setJSON(K_OURA,next);
       set(K_OURATIME,String(Date.now()));
+      try{ pushOura(next); }catch(e){}
       cb({ok:true, incremental:!!have});
     }).catch(function(e){ clearTimeout(to); cb({error:e.name==="AbortError"?"Timed out reaching Oura":e.message}); });
   }
@@ -4488,15 +4732,16 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       var rd=new FileReader();rd.onload=function(x){try{var p=parseCSV(x.target.result);
         if(!p.length||!("rMSSD" in p[0])){alert("That file doesn't look like a 360HP export \u2014 no rMSSD column found.");return;}
         var wrote=setJSON(K_ROWS,p);
-        var back=null; try{ back=JSON.parse(localStorage.getItem(K_ROWS)||"null"); }catch(e2){}
+        // Read back through get(), not localStorage - K_ROWS lives in IndexedDB now.
+        var back=null; try{ back=JSON.parse(get(K_ROWS)||"null"); }catch(e2){}
         if(!wrote || !Array.isArray(back) || back.length!==p.length){
-          var rp=storageReport();
           alert("\u26a0\ufe0f The import did NOT save.\n\nThis device's storage is refusing writes"+
-                (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\nIn use: "+kb(rp.total)+
-                (rp.items[0]?("\nBiggest: "+rp.items[0].k+" "+kb(rp.items[0].b)):"")+
-                "\n\nThat is why nothing changed on screen. Back up, then clear space.");
+                (STORAGE_ERR?" ("+STORAGE_ERR.name+")":"")+".\n\nThis is not a space problem. It usually means "+
+                "Private Browsing, or Safari blocking site data for this page.\n\nBack up from this tab, "+
+                "then reopen the app from your Home Screen.");
           render(false); return;
         }
+        try{ pushHp(p); }catch(e){}          // straight up to Supabase; cache already written
         try{ clearLock(isoToday()); }catch(e){} // new 360HP CSV = the real morning reading arriving; re-take TODAY only. Past locks are never touched.
         render(true);}catch(e){alert("Couldn't read that file. Make sure it's the raw 360HP CSV export.");}};
       rd.readAsText(f);});
@@ -4818,13 +5063,24 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       // today's row has no hours yet, fall back to the most recent day that does (and label it).
       var slpVal=today.o_sleephrs, slpWhen="last night";
       if(slpVal==null){
-        for(var si=model.length-1; si>=0 && si>=model.length-4; si--){
-          if(model[si].o_sleephrs!=null){ slpVal=model[si].o_sleephrs;
-            slpWhen=(si===model.length-1)?"last night":"most recent"; break; }
+        // Anchor the walk-back on TODAY's position, not the end of the array - those are
+        // different rows whenever a trailing day carries partial Oura data, and the old
+        // version could show a different night than the rest of the card describes.
+        var ti=model.indexOf(today); if(ti<0) ti=model.length-1;
+        for(var si=ti; si>=0 && si>=ti-3; si--){
+          if(model[si].o_sleephrs!=null){
+            slpVal=model[si].o_sleephrs;
+            // Name the night rather than saying a vague "most recent".
+            slpWhen=(si===ti)?"last night":("night of "+fmt(dLocal(model[si].iso)));
+            break;
+          }
         }
       }
+      // Shown as h/min to match what the Oura app shows. 6.8 h and "6h 50m" are the same
+      // number, but the decimal reads as wrong when you compare the two side by side.
+      function hm(v){ var t=Math.round(v*60); return Math.floor(t/60)+"h "+String(t%60).padStart(2,"0")+"m"; }
       cells+=miniCell(
-        slpVal!=null?('<span>'+slpVal.toFixed(1)+'</span><small>h</small>'):"\u2014", "Sleep time",
+        slpVal!=null?('<span>'+hm(slpVal)+'</span>'):"\u2014", "Sleep time",
         slpWhen,
         miniRing(slpVal, 7.5, "high", slpVal!=null?Math.min(1,slpVal/8.5):0));
       st.innerHTML=cells;
@@ -4841,6 +5097,33 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
       var srep=storageReport();
       var sline=document.createElement("div");
       sline.style.cssText="font-size:11.5px;color:"+C.muted+";margin:2px 2px 10px;line-height:1.5;";
+      var cloudLine=document.createElement("div");
+      cloudLine.style.cssText="font-size:11.5px;margin:2px 2px 4px;line-height:1.5;color:"+
+        (cloudStatus.state==="ok"?C.glow:cloudStatus.state==="error"?C.amber:C.muted)+";";
+      cloudLine.textContent =
+        cloudStatus.state==="ok"    ? ("Synced with Supabase \u2014 last "+CLOUD_WINDOW+" days, "+
+                                       (cloudStatus.at?new Date(cloudStatus.at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"}):"")+".") :
+        cloudStatus.state==="loading"? "Syncing with Supabase\u2026 (showing your cached copy)" :
+        cloudStatus.state==="error"  ? ("Showing your cached copy \u2014 cloud sync failed ("+(cloudStatus.msg||"")+").") :
+        cloudStatus.state==="offline"? "Showing your cached copy \u2014 sign in to sync." :
+                                       "Showing your cached copy.";
+      body.appendChild(cloudLine);
+      var lockLine=document.createElement("div");
+      lockLine.style.cssText="font-size:11.5px;color:"+C.muted+";margin:2px 2px 4px;line-height:1.5;";
+      var nLocal=Object.keys(getLocks()||{}).length;
+      if(!teamConfigured()){
+        lockLine.textContent="Locked scores: "+nLocal+" on this device (cloud sync not set up).";
+      } else if(_lockSync && _lockSync.ok){
+        lockLine.style.color=C.glow;
+        lockLine.textContent="Locked scores: "+nLocal+" \u2014 in sync with the cloud"+
+          ((_lockSync.pulled||_lockSync.pushed)?(" (pulled "+_lockSync.pulled+", pushed "+_lockSync.pushed+")"):"")+".";
+      } else if(_lockSync && !_lockSync.ok){
+        lockLine.style.color=C.amber;
+        lockLine.textContent="Locked scores: "+nLocal+" on this device \u2014 cloud sync pending ("+(_lockSync.msg||"")+").";
+      } else {
+        lockLine.textContent="Locked scores: "+nLocal+" \u2014 checking the cloud\u2026";
+      }
+      body.appendChild(lockLine);
       sline.textContent = srep.idb
         ? ("History "+kb(srep.bulk)+" in IndexedDB \u00b7 settings "+kb(srep.total)+" \u2014 no limit to worry about.")
         : ("Storage in use: "+kb(srep.total)+" \u2014 IndexedDB unavailable on this browser, using fallback.");
@@ -5027,8 +5310,23 @@ if(!window.supabase){document.write('<scr'+'ipt src="https://cdn.jsdelivr.net/np
         if(isViewer()){
           loadViewerData().then(function(){ render(false); });
         } else {
-          render(false);
-          if(_teamUser){ try{ syncToTeam(analyze(fuse())); }catch(e){} }
+          // Reconcile locks with Supabase BEFORE painting a score, so the number you
+          // see on this device is the same number the other one shows.
+          render(false);                       // instant paint from the local cache
+          // Then reconcile with Supabase. Locks first (they decide the number shown),
+          // then the source data. Repaint only if something actually moved.
+          syncLocks().then(function(ls){
+            _lockSync = ls;
+            if(ls && ls.ok && (ls.pulled||ls.pushed)) render(false);
+            var seeded = get("readiness_cloud_seeded")==="1";
+            return seeded ? pullAll() : seedCloud().then(pullAll);
+          }).then(function(pr){
+            if(pr && pr.changed) render(false); else render(false);
+            if(_teamUser){ try{ syncToTeam(analyze(fuse())); }catch(e){} }
+          }).catch(function(e){
+            cloudStatus={state:"error",msg:(e&&e.message)||"sync failed",at:Date.now()};
+            render(false);
+          });
           if(!isViewer() && WORKER_URL && WORKER_URL.indexOf("http")===0){
             ouraStatus={state:"loading",msg:""};
             fetchOura(function(res){ ouraStatus=res.ok?{state:"ok",msg:""}:{state:"err",msg:res.error||"failed"}; render(false); });
